@@ -47,6 +47,7 @@ mod renderer;
 mod scheduler;
 mod string;
 mod window_context;
+mod working_directory;
 
 mod gl {
     #![allow(clippy::all, unsafe_op_in_unsafe_fn)]

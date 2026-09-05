@@ -13,7 +13,7 @@ use std::fmt::Debug;
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(unix)]
 use std::sync::Arc;
@@ -46,7 +46,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 
 #[cfg(unix)]
 use crate::cli::{IpcConfig, ParsedOptions};
-use crate::cli::{Options as CliOptions, WindowOptions};
+use crate::cli::{Options as CliOptions, WindowOptions, new_instance_args};
 use crate::clipboard::Clipboard;
 use crate::config::ui_config::{HintAction, HintInternalAction};
 use crate::config::{self, UiConfig};
@@ -64,6 +64,7 @@ use crate::message_bar::{Message, MessageBuffer};
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::WindowContext;
+use crate::working_directory;
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -855,37 +856,16 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     fn spawn_new_instance(&mut self) {
-        let mut env_args = env::args();
+        let mut env_args = env::args_os();
         let alacritty = env_args.next().unwrap();
-
-        let mut args: Vec<String> = Vec::new();
-
-        // Reuse the arguments passed to Alacritty for the new instance.
-        #[allow(clippy::while_let_on_iterator)]
-        while let Some(arg) = env_args.next() {
-            // New instances shouldn't inherit command.
-            if arg == "-e" || arg == "--command" {
-                break;
-            }
-
-            // On unix, the working directory of the foreground shell is used by `start_daemon`.
-            #[cfg(not(windows))]
-            if arg == "--working-directory" {
-                let _ = env_args.next();
-                continue;
-            }
-
-            args.push(arg);
-        }
-
-        self.spawn_daemon(&alacritty, &args);
+        let working_directory = self.working_directory();
+        let args = new_instance_args(env_args, working_directory.as_deref());
+        self.spawn_daemon_with_directory(&alacritty, &args, working_directory.as_deref());
     }
 
-    #[cfg(not(windows))]
     fn create_new_window(&mut self, #[cfg(target_os = "macos")] tabbing_id: Option<String>) {
         let mut options = WindowOptions::default();
-        options.terminal_options.working_directory =
-            foreground_process_path(self.master_fd, self.shell_pid).ok();
+        options.terminal_options.working_directory = self.working_directory();
 
         #[cfg(target_os = "macos")]
         {
@@ -895,27 +875,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let _ = self.event_proxy.send_event(Event::new(EventType::CreateWindow(options), None));
     }
 
-    #[cfg(windows)]
-    fn create_new_window(&mut self) {
-        let _ = self
-            .event_proxy
-            .send_event(Event::new(EventType::CreateWindow(WindowOptions::default()), None));
-    }
-
     fn spawn_daemon<I, S>(&self, program: &str, args: I)
     where
         I: IntoIterator<Item = S> + Debug + Copy,
         S: AsRef<OsStr>,
     {
-        #[cfg(not(windows))]
-        let result = spawn_daemon(program, args, self.master_fd, self.shell_pid);
-        #[cfg(windows)]
-        let result = spawn_daemon(program, args);
-
-        match result {
-            Ok(_) => debug!("Launched {program} with args {args:?}"),
-            Err(err) => warn!("Unable to launch {program} with args {args:?}: {err}"),
-        }
+        let working_directory = self.working_directory();
+        self.spawn_daemon_with_directory(program.as_ref(), args, working_directory.as_deref());
     }
 
     fn change_font_size(&mut self, delta: f32) {
@@ -1500,6 +1466,26 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 }
 
 impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
+    fn spawn_daemon_with_directory<I, S>(&self, program: &OsStr, args: I, directory: Option<&Path>)
+    where
+        I: IntoIterator<Item = S> + Debug + Copy,
+        S: AsRef<OsStr>,
+    {
+        match spawn_daemon(program, args, directory) {
+            Ok(_) => debug!("Launched {program:?} with args {args:?}"),
+            Err(err) => warn!("Unable to launch {program:?} with args {args:?}: {err}"),
+        }
+    }
+
+    fn working_directory(&self) -> Option<PathBuf> {
+        working_directory::resolve(self.terminal.current_directory(), || {
+            #[cfg(not(windows))]
+            return foreground_process_path(self.master_fd, self.shell_pid).ok();
+            #[cfg(windows)]
+            None
+        })
+    }
+
     fn update_search(&mut self) {
         let regex = match self.search_state.regex() {
             Some(regex) => regex,

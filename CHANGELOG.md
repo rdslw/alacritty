@@ -15,6 +15,15 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Fixed `alacritty-escapes(7)` manpage missing from macOS install
 - Added the `Open Alacritty here` entry to the right-click context menu for folders on Windows
 
+### Added
+
+- OSC 7 working-directory inheritance for new windows, instances, and launched commands
+
+### Changed
+
+- `SpawnNewInstance` passes the inherited directory explicitly, so it now overrides
+  `general.working_directory` in the new instance like `CreateNewWindow` already did
+
 ### Fixed
 
 - Spurious "Failed to set new owner of XCB selection" warnings on X11

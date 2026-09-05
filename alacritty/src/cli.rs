@@ -1,7 +1,8 @@
 use std::cmp::max;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use alacritty_config::SerdeReplace;
@@ -150,6 +151,39 @@ fn parse_hex_or_decimal(input: &str) -> Option<u32> {
         .strip_prefix("0x")
         .and_then(|value| u32::from_str_radix(value, 16).ok())
         .or_else(|| input.parse().ok())
+}
+
+/// Reuse launch options while replacing the inherited directory and dropping the command.
+pub fn new_instance_args(
+    mut args: impl Iterator<Item = OsString>,
+    working_directory: Option<&Path>,
+) -> Vec<OsString> {
+    let mut inherited = Vec::new();
+    // Only drop an explicit directory when there is a replacement for it.
+    let replace_directory = working_directory.is_some();
+
+    while let Some(arg) = args.next() {
+        let bytes = arg.as_encoded_bytes();
+        if bytes.starts_with(b"-e") || arg == "--command" || bytes.starts_with(b"--command=") {
+            break;
+        }
+        if replace_directory {
+            if arg == "--working-directory" {
+                args.next();
+                continue;
+            } else if bytes.starts_with(b"--working-directory=") {
+                continue;
+            }
+        }
+        inherited.push(arg);
+    }
+
+    // Passing this explicitly also overrides general.working_directory in the new instance.
+    if let Some(directory) = working_directory {
+        inherited.push("--working-directory".into());
+        inherited.push(directory.as_os_str().to_owned());
+    }
+    inherited
 }
 
 /// Terminal specific cli options which can be passed to new windows via IPC.
@@ -438,6 +472,52 @@ mod tests {
     #[cfg(target_os = "linux")]
     use clap_complete::Shell;
     use toml::Table;
+
+    #[test]
+    fn new_instance_inherits_directory_without_command() {
+        for directory in [vec!["--working-directory", "old"], vec!["--working-directory=old"]] {
+            for command in ["-e", "--command", "--command=sh", "-esh"] {
+                let args = [vec!["--title", "title"], directory.clone(), vec![command, "ignored"]]
+                    .concat()
+                    .into_iter()
+                    .map(OsString::from);
+                let args = new_instance_args(args, Some(Path::new("new directory")));
+                assert_eq!(args, ["--title", "title", "--working-directory", "new directory"]);
+            }
+        }
+    }
+
+    #[test]
+    fn new_instance_without_reported_directory() {
+        let args = ["--working-directory=old", "--title", "title"].into_iter().map(OsString::from);
+        let args = new_instance_args(args, None);
+        assert_eq!(args, ["--working-directory=old", "--title", "title"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_instance_non_utf8_directory() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/\xff".to_vec()));
+        let args = new_instance_args(std::iter::empty(), Some(&path));
+        assert_eq!(args[1], path.as_os_str());
+    }
+
+    #[test]
+    fn inherited_directory_overrides_config() {
+        let inherited = tempfile::tempdir().unwrap();
+        let configured = tempfile::tempdir().unwrap();
+        let args = new_instance_args(std::iter::empty(), Some(inherited.path()));
+        let args = std::iter::once(OsString::from("alacritty")).chain(args);
+        let options = Options::try_parse_from(args).unwrap();
+        let mut pty_config = PtyOptions {
+            working_directory: Some(configured.path().to_path_buf()),
+            ..Default::default()
+        };
+        options.window_options.terminal_options.override_pty_config(&mut pty_config);
+        assert_eq!(pty_config.working_directory.as_deref(), Some(inherited.path()));
+    }
 
     #[test]
     fn dynamic_title_ignoring_options_by_default() {

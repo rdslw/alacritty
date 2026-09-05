@@ -839,8 +839,12 @@ _https://docs.rs/winit/latest/winit/keyboard/enum.Key.html#variant.Dead_
 			Clear warning and error notices.
 		*SpawnNewInstance*
 			Spawn a new instance of Alacritty.
+			Inherits a usable local directory reported through OSC 7, or the
+			foreground process's directory on Unix.
 		*CreateNewWindow*
 			Create a new Alacritty window.
+			Inherits a usable local directory reported through OSC 7, or the
+			foreground process's directory on Unix.
 		*ToggleFullscreen*
 			Toggle fullscreen.
 		*ToggleMaximized*

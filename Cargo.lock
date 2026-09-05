@@ -45,6 +45,7 @@ dependencies = [
  "crossfont",
  "dirs",
  "embed-resource",
+ "gethostname",
  "gl_generator",
  "glutin",
  "home",
@@ -55,6 +56,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "percent-encoding",
  "png",
  "polling",
  "serde",
@@ -2123,8 +2125,6 @@ dependencies = [
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
  "bitflags 2.9.4",

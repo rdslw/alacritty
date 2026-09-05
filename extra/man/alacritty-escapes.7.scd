@@ -224,6 +224,9 @@ brevity.
 |  _OSC 4_
 :  Implemented
 :[
+|  _OSC 7_
+:  Implemented
+:[ Report working directory as a file URI; see *WORKING DIRECTORY*
 |  _OSC 8_
 :  Implemented
 :[
@@ -271,6 +274,31 @@ brevity.
 # BUGS
 
 Found a bug? Please report it at _https://github.com/alacritty/alacritty/issues_.
+
+# WORKING DIRECTORY
+
+_OSC 7 ; file://hostname/absolute/path ST_ reports the shell's working directory.
+BEL may be used instead of ST. Percent-encode reserved characters in the path
+(for example, _%20_ for a space and _%3B_ for a semicolon). On Windows, use a drive
+path such as _file:///C:/Users/name_.
+
+New windows, new instances, and commands launched by Alacritty prefer the latest
+reported directory when it is a usable local directory. An empty hostname,
+_localhost_, or the local machine's hostname is accepted, ignoring ASCII case.
+Other hosts, hostname aliases, UNC paths, queries, and fragments are not used as
+local directories. No hostname lookup or remote connection is performed.
+
+Without a usable report, Alacritty uses its existing directory selection:
+foreground-process inspection on Unix and launch defaults on Windows. An empty
+OSC 7 report or a terminal reset clears the reported directory. Reports belong
+to the window and survive screen switches, scrolling, and resizing.
+
+The shell should report its directory at each prompt, including after a remote
+session exits. Recent fish releases and Oh My Zsh do this by default; fish 3,
+bash, and plain zsh need a prompt hook. Alacritty cannot detect when a report
+becomes stale or distinguish filesystems which share a hostname. Explicit
+working-directory options supplied when starting Alacritty or creating a window
+through IPC retain their behavior.
 
 # MAINTAINERS
 

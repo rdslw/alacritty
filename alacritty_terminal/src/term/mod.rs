@@ -312,6 +312,9 @@ pub struct Term<T> {
     /// Current title of the window.
     title: Option<String>,
 
+    /// Last working-directory URI reported through OSC 7.
+    current_directory: Option<String>,
+
     /// Stack of saved window titles. When a title is popped from this stack, the `title` for the
     /// term is set.
     title_stack: Vec<Option<String>>,
@@ -440,8 +443,17 @@ impl<T> Term<T> {
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
+            current_directory: Default::default(),
             mode: Default::default(),
         }
+    }
+
+    /// Last working-directory URI reported through OSC 7.
+    ///
+    /// This is untrusted metadata and may refer to a remote host. An empty report or terminal
+    /// reset clears it. Consumers must validate the URI before using it as a local path.
+    pub fn current_directory(&self) -> Option<&str> {
+        self.current_directory.as_deref()
     }
 
     /// Collect the information about the changes in the lines, which
@@ -1057,6 +1069,11 @@ impl<T> Dimensions for Term<T> {
 }
 
 impl<T: EventListener> Handler for Term<T> {
+    #[inline]
+    fn set_current_directory(&mut self, uri: String) {
+        self.current_directory = if uri.is_empty() { None } else { Some(uri) };
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -1844,6 +1861,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
         self.title = None;
+        self.current_directory = None;
         self.selection = None;
         self.vi_mode_cursor = Default::default();
         self.keyboard_mode_stack = Default::default();
@@ -2517,6 +2535,70 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    #[test]
+    fn osc7_fragmented_reports() {
+        let uri = "file://localhost/tmp/a%20b/ż;tail;";
+        for terminator in ["\x07", "\x1b\\"] {
+            let sequence = format!("\x1b]7;{uri}{terminator}");
+            for split in 0..=sequence.len() {
+                let mut term = Term::new(Config::default(), &TermSize::new(80, 24), VoidListener);
+                let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+                parser.advance(&mut term, &sequence.as_bytes()[..split]);
+                parser.advance(&mut term, &sequence.as_bytes()[split..]);
+                assert_eq!(term.current_directory(), Some(uri));
+                assert_eq!(term.grid().cursor.point, Point::default());
+            }
+        }
+    }
+
+    #[test]
+    fn osc7_lifecycle() {
+        let size = TermSize::new(80, 24);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let other = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        assert_eq!(term.current_directory(), None);
+
+        parser.advance(&mut term, b"\x1b]7;file:///tmp\x07");
+        parser.advance(&mut term, b"\x1b[?1049h\x1b[?1049l\x1b[2J\x1b[3J");
+        term.resize(TermSize::new(100, 30));
+        assert_eq!(term.current_directory(), Some("file:///tmp"));
+        assert_eq!(other.current_directory(), None);
+
+        parser.advance(&mut term, b"\x1b]7;file://remote/remote-path\x07");
+        assert_eq!(term.current_directory(), Some("file://remote/remote-path"));
+        parser.advance(&mut term, b"\x1b]7;invalid-uri\x07");
+        assert_eq!(term.current_directory(), Some("invalid-uri"));
+        parser.advance(&mut term, b"\x1b]7;\x07");
+        assert_eq!(term.current_directory(), None);
+
+        parser.advance(&mut term, b"\x1b]7;file:///tmp\x07\x1bc");
+        assert_eq!(term.current_directory(), None);
+    }
+
+    #[test]
+    fn osc7_invalid_reports_and_parser_recovery() {
+        let mut term = Term::new(Config::default(), &TermSize::new(80, 24), VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(&mut term, b"\x1b]7;file:///previous\x07");
+        assert_eq!(term.current_directory(), Some("file:///previous"));
+
+        // Invalid reports are ignored and keep the previous value.
+        for sequence in [
+            &b"\x1b]7\x07"[..],
+            b"\x1b]7;file:///invalid-\xff\x07",
+            b"\x1b]7;file:///truncated;a;b;c;d;e;f;g;h;i;j;k;l;m;n;o;p\x07",
+        ] {
+            parser.advance(&mut term, sequence);
+            assert_eq!(term.current_directory(), Some("file:///previous"), "{sequence:?}");
+        }
+
+        parser.advance(&mut term, b"\x1b]7;file:///valid\x1b\\OK");
+        assert_eq!(term.current_directory(), Some("file:///valid"));
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'O');
+        assert_eq!(term.grid()[Line(0)][Column(1)].c, 'K');
+    }
 
     #[test]
     fn scroll_display_page_up() {

@@ -84,3 +84,24 @@ that.
 Alacritty supports running multiple terminal emulators from the same Alacritty
 instance. New windows can be created either by using the `CreateNewWindow`
 keybinding action, or by executing the `alacritty msg create-window` subcommand.
+
+### Working directory
+
+Shells can report their working directory using OSC 7. The `CreateNewWindow` and
+`SpawnNewInstance` actions, as well as external commands launched by Alacritty,
+prefer a usable local directory from the latest report. On Unix, Alacritty falls
+back to inspecting the foreground process. On Windows it uses the usual launch
+defaults when there is no usable report.
+
+For example, this reports `/tmp/project files` on the local machine:
+
+```sh
+printf '\033]7;file:///tmp/project%%20files\033\\'
+```
+
+Configure your shell to emit a percent-encoded `file://hostname/absolute/path`
+URI at each prompt to keep this information up to date. Recent fish releases and
+Oh My Zsh do this by default. fish 3 only reports to terminals it recognizes,
+which excludes Alacritty, and bash or plain zsh need a prompt hook. Remote hosts
+are not interpreted as local paths. See [alacritty-escapes(7) manpage] for host
+matching, Windows paths, and reset behavior.

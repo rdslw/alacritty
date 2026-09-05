@@ -7,9 +7,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 #[cfg(not(windows))]
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 #[cfg(target_os = "openbsd")]
 use std::ptr;
@@ -33,7 +34,11 @@ use crate::macos;
 
 /// Start a new process in the background.
 #[cfg(windows)]
-pub fn spawn_daemon<I, S>(program: &str, args: I) -> io::Result<()>
+pub fn spawn_daemon<I, S>(
+    program: &OsStr,
+    args: I,
+    working_directory: Option<&Path>,
+) -> io::Result<()>
 where
     I: IntoIterator<Item = S> + Copy,
     S: AsRef<OsStr>,
@@ -42,7 +47,11 @@ where
     // CREATE_NEW_PROCESS_GROUP and CREATE_NO_WINDOW has the effect
     // that console applications will run without opening a new
     // console window.
-    Command::new(program)
+    let mut command = Command::new(program);
+    if let Some(working_directory) = working_directory {
+        command.current_dir(working_directory);
+    }
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -55,10 +64,9 @@ where
 /// Start a new process in the background.
 #[cfg(not(windows))]
 pub fn spawn_daemon<I, S>(
-    program: &str,
+    program: &OsStr,
     args: I,
-    master_fd: RawFd,
-    shell_pid: u32,
+    working_directory: Option<&Path>,
 ) -> io::Result<()>
 where
     I: IntoIterator<Item = S> + Copy,
@@ -67,9 +75,8 @@ where
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
 
-    let working_directory = foreground_process_path(master_fd, shell_pid)
-        .ok()
-        .and_then(|path| CString::new(path.into_os_string().into_vec()).ok());
+    let working_directory =
+        working_directory.and_then(|path| CString::new(path.as_os_str().as_bytes()).ok());
 
     unsafe {
         command
@@ -95,7 +102,7 @@ where
                     _ => libc::_exit(0),
                 }
 
-                // Copy foreground process' working directory, ignoring invalid paths.
+                // Set the child's working directory, ignoring invalid paths.
                 if let Some(working_directory) = working_directory.as_ref() {
                     libc::chdir(working_directory.as_ptr());
                 }
@@ -163,5 +170,36 @@ pub fn foreground_process_path(
     } else {
         let foreground_path = unsafe { CStr::from_ptr(buf.as_ptr().cast()) }.to_str()?;
         Ok(PathBuf::from(foreground_path))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::{Duration, Instant};
+    use std::{env, fs, thread};
+
+    use super::*;
+
+    #[test]
+    fn daemon_inherits_directory_without_changing_parent() {
+        let parent = env::current_dir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("cwd");
+        let args =
+            [OsStr::new("-c"), OsStr::new("pwd -P > \"$1\""), OsStr::new("sh"), output.as_os_str()];
+        spawn_daemon(OsStr::new("/bin/sh"), args, Some(directory.path())).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cwd = loop {
+            if let Ok(cwd) = fs::read_to_string(&output) {
+                if !cwd.is_empty() {
+                    break PathBuf::from(cwd.trim_end());
+                }
+            }
+            assert!(Instant::now() < deadline, "Daemon did not report its directory");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(cwd, directory.path().canonicalize().unwrap());
+        assert_eq!(env::current_dir().unwrap(), parent);
     }
 }
