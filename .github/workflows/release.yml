@@ -4,19 +4,38 @@ on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
+permissions:
+  contents: write
+
 env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
+  TAG: ${{ github.ref_name }}
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 && exit 0
+          gh release create "$TAG" \
+            --verify-tag \
+            --latest \
+            --title "Alacritty $TAG" \
+            --notes "Fork build of Alacritty $TAG from ${GITHUB_REPOSITORY}."
+
   macos:
+    needs: create-release
     runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: brew install scdoc
-      - name: Install ARM target
+      - name: Install targets
         run: rustup update && rustup target add aarch64-apple-darwin && rustup target add x86_64-apple-darwin
       - name: Test
         run: cargo test --release --target=x86_64-apple-darwin
@@ -26,41 +45,20 @@ jobs:
         run: make dmg-universal
       - name: Upload Application
         run: |
-          mv ./target/release/osx/Alacritty.dmg ./Alacritty-${GITHUB_REF##*/}.dmg
-          ./.github/workflows/upload_asset.sh ./Alacritty-${GITHUB_REF##*/}.dmg $GITHUB_TOKEN
-
-  windows:
-    runs-on: windows-latest
-
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test
-        run: cargo test --release
-      - name: Build
-        run: cargo build --release
-      - name: Upload portable executable
-        run: |
-          cp ./target/release/alacritty.exe ./Alacritty-${GITHUB_REF##*/}-portable.exe
-          ./.github/workflows/upload_asset.sh \
-            ./Alacritty-${GITHUB_REF##*/}-portable.exe $GITHUB_TOKEN
-      - name: Install WiX
-        run: dotnet tool install --global wix --version 4.0.5
-      - name: Create msi installer
-        run: |
-          wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
-          wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-          -out "./Alacritty-${GITHUB_REF##*/}-installer.msi" "alacritty/windows/wix/alacritty.wxs"
-      - name: Upload msi installer
-        run: |
-          ./.github/workflows/upload_asset.sh \
-            ./Alacritty-${GITHUB_REF##*/}-installer.msi $GITHUB_TOKEN
+          mv ./target/release/osx/Alacritty.dmg "./Alacritty-$TAG.dmg"
+          gh release upload "$TAG" "./Alacritty-$TAG.dmg" --clobber
 
   linux:
-    runs-on: ubuntu-latest
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +69,28 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev python3 scdoc
       - name: Test
         run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Package binary
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          name="Alacritty-$TAG-linux-${{ matrix.arch }}"
+          mkdir "$name"
+          cp ./target/release/alacritty "$name/"
+          tar -czf "$name.tar.gz" "$name"
+      - name: Upload binary
+        run: gh release upload "$TAG" "./Alacritty-$TAG-linux-${{ matrix.arch }}.tar.gz" --clobber
+
+  assets:
+    needs: create-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install scdoc
       - name: Generate manpages
         run: |
           scdoc < extra/man/alacritty.1.scd | gzip -c > "./alacritty.1.gz"
@@ -81,14 +101,15 @@ jobs:
       - name: Upload Assets
         run: |
           mv ./extra/logo/alacritty-term.svg ./Alacritty.svg
-          ./.github/workflows/upload_asset.sh ./Alacritty.svg $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-msg.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-bindings.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-escapes.7.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/alacritty.bash $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/alacritty.fish $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/_alacritty $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/linux/Alacritty.desktop $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/alacritty.info $GITHUB_TOKEN
+          gh release upload "$TAG" --clobber \
+            ./Alacritty.svg \
+            ./alacritty.1.gz \
+            ./alacritty-msg.1.gz \
+            ./alacritty.5.gz \
+            ./alacritty-bindings.5.gz \
+            ./alacritty-escapes.7.gz \
+            ./extra/completions/alacritty.bash \
+            ./extra/completions/alacritty.fish \
+            ./extra/completions/_alacritty \
+            ./extra/linux/Alacritty.desktop \
+            ./extra/alacritty.info

@@ -1,6 +1,9 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ["**"]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,3 +38,39 @@ jobs:
         run: rustup update && rustup target add x86_64-apple-darwin
       - name: Build
         run: cargo build --target=x86_64-apple-darwin
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev python3 scdoc
+      - name: Rustfmt
+        run: |
+          rustup toolchain install nightly --profile minimal -c rustfmt
+          cargo +nightly fmt -- --check
+      - name: Man pages
+        run: |
+          for page in extra/man/*.scd; do scdoc < "$page" > /dev/null; done
+      - name: Stable
+        run: cargo test
+      - name: Stable (no default features)
+        run: cargo test -p alacritty_terminal --no-default-features
+      - name: Oldstable
+        run: |
+          rustup default "$(grep "rust-version" Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          cargo test
+      - name: Clippy
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets
+      - name: Feature wayland
+        run: |
+          cd alacritty
+          RUSTFLAGS="-D warnings" cargo test --no-default-features --features=wayland
+      - name: Feature x11
+        run: |
+          cd alacritty
+          RUSTFLAGS="-D warnings" cargo test --no-default-features --features=x11
