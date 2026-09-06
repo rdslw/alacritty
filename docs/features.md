@@ -105,8 +105,11 @@ Configure your shell to emit a percent-encoded `file://hostname/absolute/path`
 URI at each prompt to keep this information up to date. Recent fish releases and
 Oh My Zsh do this by default. fish 3 only reports to terminals it recognizes,
 which excludes Alacritty, and bash or plain zsh need a prompt hook. Remote hosts
-are not interpreted as local paths. See [alacritty-escapes(7) manpage] for host
-matching, Windows paths, and reset behavior.
+are not interpreted as local paths. When the shell also sends the OSC 133
+markers described under [shell integration](#shell-integration), the report is
+preferred only while the shell is at its prompt; during a command the
+foreground process is inspected first. See [alacritty-escapes(7) manpage] for
+host matching, Windows paths, and reset behavior.
 
 ## Shell integration
 
@@ -122,6 +125,11 @@ selection:
 - The `ToggleOutputSelection` vi action selects the output of the command under
   the vi cursor. <kbd>Ctrl</kbd> + triple click selects the output of the
   command under the mouse cursor.
+- When the window width changes while the shell is at its prompt, the prompt is
+  cleared before the text is reflowed, so that the shell's repaint does not
+  leave fragments of a right prompt or a multi-line prompt behind. At a
+  secondary prompt marked with `k=s`, previously accepted command lines are
+  preserved.
 
 None of these have default bindings. Example:
 
@@ -173,20 +181,27 @@ _osc133_preexec() { print -n "\e]133;C\a" }
 add-zsh-hook precmd _osc133_precmd
 add-zsh-hook preexec _osc133_preexec
 PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'
+PS2=$'%{\e]133;P;k=s\a%}'"$PS2"$'%{\e]133;B\a%}'
 ```
 
-If a hook sets `PS1` on every prompt, add the markers inside that hook.
+Mark `PS2` as a secondary prompt with `P;k=s` (or `A;k=s`) so resizing clears
+only the prompt the shell will repaint. `P` keeps the redraw settings of the
+preceding `A`.
 
-bash:
+If a hook sets `PS1` or `PS2` on every prompt, add the markers inside that hook.
+
+bash repaints only the last prompt line after a resize, hence `redraw=last`:
 
 ```bash
-PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
+PS1='\[\e]133;A;redraw=last\a\]'"$PS1"'\[\e]133;B\a\]'
+PS2='\[\e]133;P;k=s\a\]'"$PS2"'\[\e]133;B\a\]'
 PS0='\e]133;C\a'
 _osc133_precmd() { printf '\e]133;D;%s\a' "$?"; }
 PROMPT_COMMAND="_osc133_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 ```
 
-fish 4 sends the markers by default. The integration scripts shipped with kitty
-and Ghostty also work. tmux handles the markers itself and does not forward
-them to Alacritty. See [alacritty-escapes(7) manpage] for the accepted markers
-and options.
+fish 4 sends the markers by default, but does not repaint after a resize unless
+`fish_handle_reflow` is set to 1. The integration scripts shipped with kitty and
+Ghostty also work. tmux handles the markers itself and does not forward them to
+Alacritty. See [alacritty-escapes(7) manpage] for the accepted markers and
+options.

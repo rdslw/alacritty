@@ -685,6 +685,11 @@ impl<T> Term<T> {
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
+        // Clear the prompt before reflowing, so the shell's repaint lands on empty rows.
+        if old_cols != num_cols {
+            self.clear_prompt_for_redraw(num_cols);
+        }
+
         // Move vi mode cursor with the content.
         let history_size = self.history_size();
         let mut delta = num_lines as i32 - old_lines as i32;

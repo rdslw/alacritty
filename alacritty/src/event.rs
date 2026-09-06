@@ -1479,7 +1479,9 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
     }
 
     fn working_directory(&self) -> Option<PathBuf> {
-        working_directory::resolve(self.terminal.current_directory(), || {
+        // With OSC 133 markers, the OSC 7 report is trusted only while the shell is at its prompt.
+        let at_prompt = self.terminal.prompt_state().seen.then(|| self.terminal.cursor_at_prompt());
+        working_directory::resolve(self.terminal.current_directory(), at_prompt, || {
             #[cfg(not(windows))]
             return foreground_process_path(self.master_fd, self.shell_pid).ok();
             #[cfg(windows)]

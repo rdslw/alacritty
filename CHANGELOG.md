@@ -21,11 +21,14 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - OSC 133 shell integration: `ScrollToPreviousPrompt` and `ScrollToNextPrompt` actions,
   `PromptUp` and `PromptDown` vi motions, `ToggleOutputSelection` vi action, and
   Ctrl + triple click to select the output of a command
+- Prompt-aware resize: the prompt is cleared before reflowing when the shell repaints it
 
 ### Changed
 
 - `SpawnNewInstance` passes the inherited directory explicitly, so it now overrides
   `general.working_directory` in the new instance like `CreateNewWindow` already did
+- With OSC 133 markers, the OSC 7 directory is preferred only while the shell is at its
+  prompt; during a command the foreground process is inspected first
 
 ### Fixed
 

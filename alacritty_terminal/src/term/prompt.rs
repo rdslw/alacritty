@@ -4,6 +4,7 @@ use std::cmp::{max, min};
 
 use crate::grid::{Dimensions, RowMark};
 use crate::index::{Column, Direction, Line};
+use crate::term::cell::Flags;
 use crate::term::{Term, TermMode};
 use crate::vte::ansi::{PromptKind, PromptRedraw, PromptStart};
 
@@ -147,6 +148,61 @@ impl<T> Term<T> {
         }
     }
 
+    /// Clear the prompt before a width change, so the shell can repaint it on empty rows.
+    ///
+    /// Shells repaint their prompt after a resize. A reflowed right prompt or multi-line prompt
+    /// would leave fragments behind the repaint. The `redraw` option of the prompt start marker
+    /// states what the shell repaints: the whole prompt, only its last line, or nothing.
+    ///
+    /// The shell moves the cursor relative to its last position, so the cursor row must not move
+    /// during the reflow: the cursor column is clamped to the new width and the prompt is cut off
+    /// from a wrapped row above it.
+    pub(super) fn clear_prompt_for_redraw(&mut self, columns: usize) {
+        if !self.cursor_at_prompt() {
+            return;
+        }
+
+        let cursor_line = self.grid.cursor.point.line;
+        let screen_lines = Line(self.screen_lines() as i32);
+        let (start, end) = match self.prompt.redraw {
+            PromptRedraw::None => return,
+            PromptRedraw::LastLine => (cursor_line, cursor_line + 1i32),
+            PromptRedraw::Full => {
+                // Stop at the active primary or secondary prompt, preserving accepted input.
+                let mut start = cursor_line;
+                while self.grid[start].mark == RowMark::PromptContinuation && start > Line(0) {
+                    start -= 1i32;
+                }
+                let is_prompt = matches!(
+                    self.grid[start].mark,
+                    RowMark::Prompt | RowMark::PromptSecondary | RowMark::PromptContinuation
+                );
+                if !is_prompt && start != cursor_line {
+                    start += 1i32;
+                }
+                (start, screen_lines)
+            },
+        };
+
+        // Keep the first cleared row identifiable until the shell sends its markers again; bash
+        // repaints its last prompt line without a marker.
+        let start_mark = self.grid[start].mark;
+        self.grid.reset_region(start..end);
+        self.grid[start].mark = start_mark;
+
+        // The prompt starts a fresh line; do not join it with the row above during the reflow.
+        if self.prompt.redraw == PromptRedraw::Full && start > self.topmost_line() {
+            let last_column = self.last_column();
+            self.grid[start - 1i32][last_column].flags.remove(Flags::WRAPLINE);
+        }
+
+        // Keep the cursor on its row; the reflow would wrap it beyond the new width.
+        self.grid.cursor.input_needs_wrap = false;
+        self.grid.cursor.point.column = min(self.grid.cursor.point.column, Column(columns - 1));
+
+        self.mark_fully_damaged();
+    }
+
     /// Extend the prompt onto the row the cursor moved to by a line feed or a wrap.
     ///
     /// This covers multi-line prompts and wrapped input from shells which do not send `k=s`.
@@ -203,6 +259,21 @@ mod tests {
     fn row_text(term: &Term<VoidListener>, line: i32) -> String {
         let row = &term.grid()[Line(line)];
         (0..row.len()).map(|column| row[Column(column)].c).collect::<String>().trim_end().into()
+    }
+
+    /// Output, a two-line prompt with a right prompt, and typed input, on a 20 column screen.
+    fn prompt_with_right_prompt(options: &[u8]) -> Term<VoidListener> {
+        let mut term = term(20, 5, 10);
+        let mut bytes = b"old\r\n\x1b]133;A".to_vec();
+        bytes.extend_from_slice(options);
+        bytes.extend_from_slice(
+            b"\x07first\r\nsecond> \x1b]133;B\x07typed\x1b[3;16HRIGHT\x1b[3;14H",
+        );
+        feed(&mut term, &bytes);
+        assert_eq!(row_text(&term, 1), "first");
+        assert_eq!(row_text(&term, 2), "second> typed  RIGHT");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(13)));
+        term
     }
 
     #[test]
@@ -547,6 +618,200 @@ mod tests {
             assert_eq!(term.output_bounds(secondary), Some((output, output)));
             assert_eq!(row_text(&term, output.0), "out");
         }
+    }
+
+    #[test]
+    fn resize_clears_prompt_for_redraw() {
+        let mut term = prompt_with_right_prompt(b"");
+        term.resize(TermSize::new(10, 5));
+
+        assert_eq!(row_text(&term, 0), "old");
+        assert!((1..5).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt)]);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(9)));
+        assert!(term.cursor_at_prompt());
+
+        // The shell repaints the prompt on the cleared rows.
+        feed(&mut term, b"\r\x1b[A\x1b[J\x1b]133;A\x07first\r\nsecond> \x1b]133;B\x07typed");
+        assert_eq!(row_text(&term, 1), "first");
+        assert_eq!(row_text(&term, 2), "second> ty");
+        assert_eq!(row_text(&term, 3), "ped");
+        assert_eq!(marks(&term), [
+            (1, RowMark::Prompt),
+            (2, RowMark::PromptContinuation),
+            (3, RowMark::PromptContinuation)
+        ]);
+    }
+
+    #[test]
+    fn resize_preserves_accepted_input_at_secondary_prompt() {
+        // zsh only redraws the active PS2, even when the primary prompt spans multiple lines.
+        for marker in [b"\x1b]133;A;k=s\x07".as_slice(), b"\x1b]133;P;k=s\x07"] {
+            let mut term = term(40, 8, 10);
+            feed(
+                &mut term,
+                b"old\r\n\x1b]133;A\x07FIRST\r\nPROMPT> \x1b]133;B\x07printf '%s\\n' \\\r\n",
+            );
+            feed(&mut term, marker);
+            feed(&mut term, b"CONT> hello");
+
+            term.resize(TermSize::new(30, 8));
+            assert_eq!(row_text(&term, 0), "old");
+            assert_eq!(row_text(&term, 1), "FIRST", "marker: {marker:?}");
+            assert_eq!(row_text(&term, 2), "PROMPT> printf '%s\\n' \\");
+            assert!(term.grid()[Line(3)].is_clear());
+            assert_eq!(term.row_mark(Line(3)), RowMark::PromptSecondary);
+
+            // Replay zsh's repaint: it never sends the accepted command line again.
+            feed(&mut term, b"\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J");
+            feed(&mut term, marker);
+            feed(&mut term, b"CONT> hello");
+            assert_eq!(row_text(&term, 3), "CONT> hello");
+            assert_eq!(term.output_bounds(Line(1)), None);
+
+            feed(&mut term, b"\r\n\x1b]133;C\x07hello\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+            assert_eq!(term.output_bounds(Line(1)), Some((Line(4), Line(4))));
+        }
+    }
+
+    #[test]
+    fn resize_clears_only_latest_secondary_prompt() {
+        let mut term = term(20, 8, 10);
+        feed(
+            &mut term,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07one \\\r\n\
+              \x1b]133;A;k=s\x07> \x1b]133;B\x07two \\\r\n\
+              \x1b]133;P;k=s\x07first\r\n> \x1b]133;B\x07abcdefghijklmnopqrstuvwx",
+        );
+        assert_eq!(term.grid().cursor.point.line, Line(4));
+
+        // A wrapped, multi-line PS2 and another resize before its repaint.
+        for columns in [10, 12] {
+            term.resize(TermSize::new(columns, 8));
+            assert_eq!(row_text(&term, 0), "$ one \\");
+            assert_eq!(row_text(&term, 1), "> two \\");
+            assert!((2..8).all(|line| term.grid()[Line(line)].is_clear()));
+            assert_eq!(term.row_mark(Line(2)), RowMark::PromptSecondary);
+        }
+
+        feed(
+            &mut term,
+            b"\r\x1b[2A\x1b[J\x1b]133;P;k=s\x07first\r\n> \x1b]133;B\x07abcdefghijklmnopqrstuvwx",
+        );
+        assert_eq!(row_text(&term, 2), "first");
+        assert_eq!(term.output_bounds(Line(0)), None);
+        assert_eq!(term.find_prompt(Line(5), Direction::Left), Some(Line(0)));
+    }
+
+    #[test]
+    fn resize_clears_input_wrapped_at_bottom_margin() {
+        let mut term = term(10, 3, 10);
+        feed(&mut term, b"old\r\n\x1b]133;A\x07first\r\n> \x1b]133;B\x07abcdefghijkl");
+        assert_eq!(row_text(&term, -1), "old");
+
+        // The wrap scrolled the prompt row up; clearing still starts at the prompt row.
+        term.resize(TermSize::new(8, 3));
+        assert_eq!(row_text(&term, -1), "old");
+        assert!((0..3).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(0, RowMark::Prompt)]);
+    }
+
+    #[test]
+    fn resize_respects_redraw_option() {
+        // The shell does not repaint: nothing is cleared, the prompt row reflows.
+        let mut term = prompt_with_right_prompt(b";redraw=0");
+        term.resize(TermSize::new(10, 5));
+        assert_eq!(row_text(&term, -1), "old");
+        assert_eq!(row_text(&term, 0), "first");
+        assert_eq!(row_text(&term, 1), "second> ty");
+        assert_eq!(row_text(&term, 2), "ped  RIGHT");
+
+        // Bash repaints only the last line: only the cursor row is cleared, and it keeps its
+        // mark because the repaint carries no marker.
+        let mut term = prompt_with_right_prompt(b";redraw=last");
+        term.resize(TermSize::new(10, 5));
+        assert_eq!(row_text(&term, 1), "first");
+        assert!((2..5).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt), (2, RowMark::PromptContinuation)]);
+        feed(&mut term, b"\rrdslw> \x1b]133;B\x07typed");
+        assert_eq!(term.output_bounds(Line(1)), None);
+    }
+
+    #[test]
+    fn resize_keeps_prompt_when_not_repainted() {
+        // Only width changes reflow the prompt.
+        let mut term = prompt_with_right_prompt(b"");
+        term.resize(TermSize::new(20, 8));
+        assert_eq!(row_text(&term, 2), "second> typed  RIGHT");
+
+        // A running command owns the screen.
+        let mut term = prompt_with_right_prompt(b"");
+        feed(&mut term, b"\r\n\x1b]133;C\x07");
+        term.resize(TermSize::new(10, 5));
+        assert_eq!(row_text(&term, 0), "first");
+        assert_eq!(row_text(&term, 1), "second> ty");
+
+        // The alternate screen is never cleared, and the primary prompt is kept for later.
+        let mut term = prompt_with_right_prompt(b"");
+        feed(&mut term, b"\x1b[?1049h\x1b[Happ");
+        term.resize(TermSize::new(10, 5));
+        assert_eq!(row_text(&term, 0), "app");
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(row_text(&term, 0), "first");
+        assert_eq!(row_text(&term, 1), "second> ty");
+        assert!(term.cursor_at_prompt());
+    }
+
+    #[test]
+    fn resize_cuts_prompt_from_wrapped_row_above() {
+        // Like zsh's `%` end-of-output marker: the row above the prompt wrapped into it.
+        let mut term = term(20, 5, 10);
+        feed(&mut term, b"no newline%                   ");
+        feed(&mut term, b"\r \r\x1b[J\x1b]133;A\x07first\r\nsecond> \x1b]133;B\x07typed");
+        assert_eq!(row_text(&term, 0), "no newline%");
+        assert_eq!(row_text(&term, 1), "first");
+
+        term.resize(TermSize::new(30, 5));
+        assert_eq!(row_text(&term, 0), "no newline%");
+        assert!((1..5).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt)]);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(13)));
+    }
+
+    #[test]
+    fn resize_twice_before_repaint_and_with_height_change() {
+        let mut term = prompt_with_right_prompt(b"");
+
+        // Width and height change together; the rows are cleared and the cursor row stays.
+        term.resize(TermSize::new(10, 8));
+        assert_eq!(row_text(&term, 0), "old");
+        assert!((1..8).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt)]);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(9)));
+
+        // A second resize before the shell repaints finds blank rows and the kept mark.
+        term.resize(TermSize::new(6, 8));
+        assert_eq!(row_text(&term, 0), "old");
+        assert!((1..8).all(|line| term.grid()[Line(line)].is_clear()));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt)]);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(5)));
+        assert!(term.cursor_at_prompt());
+
+        // Growing back keeps the state as well.
+        term.resize(TermSize::new(20, 8));
+        assert_eq!(marks(&term), [(1, RowMark::Prompt)]);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(5)));
+    }
+
+    #[test]
+    fn resize_clears_from_cursor_without_prompt_row() {
+        // Input from a shell which never sent a prompt start marker.
+        let mut term = term(20, 5, 10);
+        feed(&mut term, b"old\r\n$ \x1b]133;B\x07typed");
+        assert!(term.cursor_at_prompt());
+        term.resize(TermSize::new(10, 5));
+        assert_eq!(row_text(&term, 0), "old");
+        assert!((1..5).all(|line| term.grid()[Line(line)].is_clear()));
     }
 
     #[cfg(feature = "serde")]

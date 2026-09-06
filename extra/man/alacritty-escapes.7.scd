@@ -296,6 +296,12 @@ foreground-process inspection on Unix and launch defaults on Windows. An empty
 OSC 7 report or a terminal reset clears the reported directory. Reports belong
 to the window and survive screen switches, scrolling, and resizing.
 
+When the shell also sends OSC 133 markers (see *SHELL INTEGRATION*), the report
+is preferred only while the shell is at its prompt. While a command runs,
+foreground-process inspection comes first and the report is the fallback,
+because the command may have changed directory or be a nested shell without
+the hook.
+
 The shell should report its directory at each prompt, including after a remote
 session exits. Recent fish releases and Oh My Zsh do this by default; fish 3,
 bash, and plain zsh need a prompt hook. Alacritty cannot detect when a report
@@ -351,14 +357,26 @@ with them. Clearing the screen keeps the marks of rows moved into the
 scrollback. A terminal reset drops all marks and the recorded shell state.
 Markers received on the alternate screen are ignored.
 
+When the width changes while the shell is at its prompt, Alacritty clears the
+prompt and the rows below it before reflowing, and the shell repaints on
+SIGWINCH. Clearing starts at the active primary or secondary prompt row,
+preserving previously accepted command lines. _redraw=last_ limits the clearing
+to the cursor row and _redraw=0_ disables it. Bash repaints only the last
+prompt line, so bash should send
+_redraw=last_. Fish repaints only when _fish_handle_reflow_ is 1. While the
+shell runs a command, the OSC 7 report is only a fallback; see
+*WORKING DIRECTORY*.
+
 Prompt navigation and output selection work per row. Output which ends on the
 row of the next prompt, because the command printed no trailing newline,
 belongs to that prompt row. Output which starts on the input row, because _C_
 arrived away from the first column, starts on the next row.
 
 Put _A_ and _B_ into the prompt string itself, so a prompt repaint sends them
-again. Send _D_ before the prompt from the precmd hook and _C_ from the preexec
-hook. See _docs/features.md_ for shell snippets.
+again. Mark the secondary prompt with _P;k=s_ and _B_; _P_ preserves the
+_redraw_ setting from the primary prompt. Send _D_ before the prompt from the
+precmd hook and _C_ from the preexec hook. See _docs/features.md_ for shell
+snippets.
 
 # MAINTAINERS
 

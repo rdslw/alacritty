@@ -9,13 +9,24 @@ use percent_encoding::percent_decode_str;
 
 /// Resolve OSC 7 metadata only when launching a process, falling back to process inspection.
 ///
-/// The report wins over process inspection, like WezTerm and GNOME Terminal. A stale report from a
-/// nested shell without the hook cannot be detected. Revisit this once OSC 133 is implemented:
-/// kitty only trusts the report while the shell is at its prompt.
-pub fn resolve(uri: Option<&str>, fallback: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
-    uri.and_then(|uri| local_path(uri, &gethostname::gethostname()))
-        .filter(|path| usable_directory(path))
-        .or_else(fallback)
+/// The report wins over process inspection, like WezTerm and GNOME Terminal. When OSC 133 markers
+/// show a running command (`at_prompt` is `Some(false)`), process inspection comes first, like
+/// kitty: the command may have changed directory or be a nested shell without the hook. Without
+/// markers (`None`) a stale report cannot be detected.
+pub fn resolve(
+    uri: Option<&str>,
+    at_prompt: Option<bool>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let reported = || {
+        uri.and_then(|uri| local_path(uri, &gethostname::gethostname()))
+            .filter(|path| usable_directory(path))
+    };
+
+    match at_prompt {
+        Some(false) => fallback().or_else(reported),
+        _ => reported().or_else(fallback),
+    }
 }
 
 /// Convert a local file URI without resolving host aliases or accessing remote filesystems.
@@ -171,22 +182,36 @@ mod tests {
     fn directory_precedence_and_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let uri = file_uri(directory.path());
-        assert_eq!(
-            resolve(Some(&uri), || panic!("OSC 7 should take precedence")),
-            Some(directory.path().to_path_buf()),
-        );
+        for at_prompt in [None, Some(true)] {
+            assert_eq!(
+                resolve(Some(&uri), at_prompt, || panic!("OSC 7 should take precedence")),
+                Some(directory.path().to_path_buf()),
+            );
+        }
 
         let file = directory.path().join("file");
         fs::write(&file, "").unwrap();
         let file_uri = file_uri(&file);
-        assert_eq!(resolve(Some(&file_uri), || None), None);
+        assert_eq!(resolve(Some(&file_uri), None, || None), None);
         directory.close().unwrap();
 
         for uri in [None, Some(""), Some("file://remote/tmp"), Some(&uri), Some(&file_uri)] {
-            let fallback = PathBuf::from("fallback");
-            assert_eq!(resolve(uri, || Some(fallback.clone())), Some(fallback));
-            assert_eq!(resolve(uri, || None), None);
+            for at_prompt in [None, Some(true), Some(false)] {
+                let fallback = PathBuf::from("fallback");
+                assert_eq!(resolve(uri, at_prompt, || Some(fallback.clone())), Some(fallback));
+                assert_eq!(resolve(uri, at_prompt, || None), None);
+            }
         }
+    }
+
+    #[test]
+    fn running_command_prefers_process_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let uri = file_uri(directory.path());
+        let fallback = PathBuf::from("fallback");
+
+        assert_eq!(resolve(Some(&uri), Some(false), || Some(fallback.clone())), Some(fallback));
+        assert_eq!(resolve(Some(&uri), Some(false), || None), Some(directory.path().to_path_buf()));
     }
 
     #[cfg(unix)]
@@ -202,7 +227,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let uri = file_uri(directory.path());
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o600)).unwrap();
-        let resolved = resolve(Some(&uri), || None);
+        let resolved = resolve(Some(&uri), None, || None);
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(resolved, None);
     }
