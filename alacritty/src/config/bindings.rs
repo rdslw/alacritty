@@ -160,6 +160,12 @@ pub enum Action {
     /// Scroll all the way to the bottom.
     ScrollToBottom,
 
+    /// Scroll to the previous shell prompt reported through OSC 133.
+    ScrollToPreviousPrompt,
+
+    /// Scroll to the next shell prompt reported through OSC 133.
+    ScrollToNextPrompt,
+
     /// Clear the display buffer(s) to remove history.
     ClearHistory,
 
@@ -304,6 +310,8 @@ pub enum ViAction {
     ToggleBlockSelection,
     /// Toggle semantic vi selection.
     ToggleSemanticSelection,
+    /// Toggle command output vi selection, using OSC 133 prompt marks.
+    ToggleOutputSelection,
     /// Jump to the beginning of the next match.
     SearchNext,
     /// Jump to the beginning of the previous match.

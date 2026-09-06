@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - OSC 7 working-directory URI tracking through `Term::current_directory`
 - OSC 133 prompt marks through `Row::mark`, `Term::prompt_state`, and `Term::cursor_at_prompt`
+- Prompt navigation through `Term::find_prompt`, `ViMotion::PromptUp`, and `ViMotion::PromptDown`
+- Command output selection through `SelectionType::Output` and `Term::output_bounds`
 
 ### Fixed
 

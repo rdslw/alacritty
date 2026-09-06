@@ -28,7 +28,7 @@ use winit::window::CursorIcon;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Boundary, Column, Direction, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::{ClipboardType, Term, TermMode};
@@ -159,6 +159,30 @@ impl Action {
             selection.include_all();
         }
     }
+
+    /// Put the previous or next shell prompt at the top of the viewport.
+    fn scroll_to_prompt<T, A>(ctx: &mut A, direction: Direction)
+    where
+        A: ActionContext<T>,
+        T: EventListener,
+    {
+        let term = ctx.terminal();
+        let top = Line(-(term.grid().display_offset() as i32));
+        let line = match term.find_prompt(top, direction) {
+            Some(line) => line,
+            // Without a next prompt, return to the active area.
+            None if direction == Direction::Right => term.bottommost_line(),
+            None => return,
+        };
+
+        ctx.scroll(Scroll::Delta(top.0 - line.0));
+
+        // Move vi mode cursor.
+        if ctx.terminal().mode().contains(TermMode::VI) {
+            ctx.terminal_mut().vi_goto_point(Point::new(line, Column(0)));
+            ctx.mark_dirty();
+        }
+    }
 }
 
 trait Execute<T: EventListener> {
@@ -200,6 +224,9 @@ impl<T: EventListener> Execute<T> for Action {
             },
             Action::Vi(ViAction::ToggleSemanticSelection) => {
                 Self::toggle_selection(ctx, SelectionType::Semantic);
+            },
+            Action::Vi(ViAction::ToggleOutputSelection) => {
+                Self::toggle_selection(ctx, SelectionType::Output);
             },
             Action::Vi(ViAction::Open) => {
                 let hint = ctx.display().vi_highlighted_hint.take();
@@ -401,6 +428,8 @@ impl<T: EventListener> Execute<T> for Action {
                 term.vi_motion(ViMotion::FirstOccupied);
                 ctx.mark_dirty();
             },
+            Action::ScrollToPreviousPrompt => Self::scroll_to_prompt(ctx, Direction::Left),
+            Action::ScrollToNextPrompt => Self::scroll_to_prompt(ctx, Direction::Right),
             Action::ClearHistory => ctx.terminal_mut().clear_screen(ClearMode::Saved),
             Action::ClearLogNotice => ctx.pop_message(),
             #[cfg(not(target_os = "macos"))]
@@ -682,6 +711,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             ClickState::TripleClick if !control => {
                 self.ctx.mouse_mut().block_hint_launcher = true;
                 self.ctx.start_selection(SelectionType::Lines, point, side);
+            },
+            ClickState::TripleClick => {
+                self.ctx.mouse_mut().block_hint_launcher = true;
+                self.ctx.start_selection(SelectionType::Output, point, side);
             },
             _ => (),
         };
@@ -1362,6 +1395,59 @@ mod tests {
                     assert!(!$binding.is_triggered_by($mode, $mods, &KEY));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn prompt_scrolling_updates_vi_selection() {
+        use alacritty_terminal::selection::Selection;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::vte::ansi;
+
+        for (action, scroll, origin) in [
+            (Action::ScrollToPreviousPrompt, Scroll::Bottom, Line(3)),
+            (Action::ScrollToNextPrompt, Scroll::Top, Line(-1)),
+        ] {
+            let mut clipboard = Clipboard::new_nop();
+            let cfg = UiConfig::default();
+            let size = SizeInfo::new(120., 36., 3., 3., 0., 0., false);
+            let mut terminal = Term::new(cfg.term_options(), &TermSize::new(20, 4), MockEventProxy);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(
+                &mut terminal,
+                b"\x1b]133;A\x07$ a\r\n\x1b]133;C\x07one\r\n\x1b]133;D\x07\
+                  \x1b]133;A\x07$ b\r\n\x1b]133;C\x07two\r\n\r\n\r\n\x1b]133;D\x07\
+                  \x1b]133;A\x07$ c\r\n\x1b]133;C\x07",
+            );
+            terminal.toggle_vi_mode();
+            terminal.scroll_display(scroll);
+            terminal.vi_mode_cursor.point = Point::new(origin, Column(0));
+            terminal.selection = Some(Selection::new(
+                SelectionType::Lines,
+                terminal.vi_mode_cursor.point,
+                Side::Left,
+            ));
+            let mut mouse = Mouse::default();
+            let mut inline_search_state = InlineSearchState::default();
+            let mut message_buffer = MessageBuffer::default();
+            let mut context = ActionContext {
+                terminal: &mut terminal,
+                mouse: &mut mouse,
+                size_info: &size,
+                clipboard: &mut clipboard,
+                modifiers: Default::default(),
+                message_buffer: &mut message_buffer,
+                inline_search_state: &mut inline_search_state,
+                config: &cfg,
+            };
+
+            action.execute(&mut context);
+            let terminal = context.terminal;
+            assert_eq!(terminal.grid().display_offset(), 2);
+            assert_eq!(terminal.vi_mode_cursor.point, Point::new(Line(-2), Column(0)));
+            let selected = terminal.selection.as_ref().unwrap().to_range(terminal).unwrap();
+            assert_eq!(selected.start.line, Line(-2), "{action:?}");
+            assert_eq!(selected.end.line, origin, "{action:?}");
         }
     }
 

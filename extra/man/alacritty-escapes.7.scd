@@ -351,6 +351,11 @@ with them. Clearing the screen keeps the marks of rows moved into the
 scrollback. A terminal reset drops all marks and the recorded shell state.
 Markers received on the alternate screen are ignored.
 
+Prompt navigation and output selection work per row. Output which ends on the
+row of the next prompt, because the command printed no trailing newline,
+belongs to that prompt row. Output which starts on the input row, because _C_
+arrived away from the first column, starts on the next row.
+
 Put _A_ and _B_ into the prompt string itself, so a prompt repaint sends them
 again. Send _D_ before the prompt from the precmd hook and _C_ from the preexec
 hook. See _docs/features.md_ for shell snippets.

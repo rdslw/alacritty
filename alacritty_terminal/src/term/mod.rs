@@ -562,7 +562,7 @@ impl<T> Term<T> {
 
                 res += self.line_to_string(end.line, start.column..end.column, true).trim_end();
             },
-            Some(Selection { ty: SelectionType::Lines, .. }) => {
+            Some(Selection { ty: SelectionType::Lines | SelectionType::Output, .. }) => {
                 res = self.bounds_to_string(start, end) + "\n";
             },
             _ => {

@@ -827,6 +827,10 @@ _https://docs.rs/winit/latest/winit/keyboard/enum.Key.html#variant.Dead_
 			Scroll all the way to the top.
 		*ScrollToBottom*
 			Scroll all the way to the bottom.
+		*ScrollToPreviousPrompt*
+			Scroll to the previous shell prompt (requires OSC 133).
+		*ScrollToNextPrompt*
+			Scroll to the next shell prompt (requires OSC 133).
 		*ClearHistory*
 			Clear the display buffer(s) to remove history.
 		*Hide*
@@ -903,6 +907,10 @@ _https://docs.rs/winit/latest/winit/keyboard/enum.Key.html#variant.Dead_
 			Move above the current paragraph.
 		*ParagraphDown*
 			Move below the current paragraph.
+		*PromptUp*
+			Move to the previous shell prompt (requires OSC 133).
+		*PromptDown*
+			Move to the next shell prompt (requires OSC 133).
 		*ToggleNormalSelection*
 			Toggle normal vi selection.
 		*ToggleLineSelection*
@@ -911,6 +919,8 @@ _https://docs.rs/winit/latest/winit/keyboard/enum.Key.html#variant.Dead_
 			Toggle block vi selection.
 		*ToggleSemanticSelection*
 			Toggle semantic vi selection.
+		*ToggleOutputSelection*
+			Toggle command output vi selection (requires OSC 133).
 		*SearchNext*
 			Jump to the beginning of the next match.
 		*SearchPrevious*

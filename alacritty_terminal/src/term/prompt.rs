@@ -1,7 +1,9 @@
 //! OSC 133 prompt marks and shell state.
 
-use crate::grid::RowMark;
-use crate::index::{Column, Line};
+use std::cmp::{max, min};
+
+use crate::grid::{Dimensions, RowMark};
+use crate::index::{Column, Direction, Line};
 use crate::term::{Term, TermMode};
 use crate::vte::ansi::{PromptKind, PromptRedraw, PromptStart};
 
@@ -51,6 +53,50 @@ impl<T> Term<T> {
     /// OSC 133 marker of a row.
     pub fn row_mark(&self, line: Line) -> RowMark {
         self.grid[line].mark
+    }
+
+    /// Nearest prompt row strictly above (`Left`) or below (`Right`) a line.
+    pub fn find_prompt(&self, from: Line, direction: Direction) -> Option<Line> {
+        let topmost = self.topmost_line().0;
+        let bottommost = self.bottommost_line().0;
+        let is_prompt =
+            |line: i32| (self.grid[Line(line)].mark == RowMark::Prompt).then_some(Line(line));
+
+        match direction {
+            Direction::Left => (topmost..min(from.0, bottommost + 1)).rev().find_map(is_prompt),
+            Direction::Right => (max(from.0 + 1, topmost)..=bottommost).find_map(is_prompt),
+        }
+    }
+
+    /// First and last row of the command output which contains or follows a line.
+    ///
+    /// The output starts after the prompt and its continuation rows and ends before the next
+    /// prompt, without trailing empty rows. Rows above the first prompt count as output.
+    pub fn output_bounds(&self, line: Line) -> Option<(Line, Line)> {
+        let topmost = self.topmost_line();
+        let bottommost = self.bottommost_line();
+
+        // Skip the prompt which starts the command and its continuation rows.
+        let prompt = self.find_prompt(line + 1i32, Direction::Left).unwrap_or(topmost);
+        let mut start =
+            if self.grid[prompt].mark == RowMark::Prompt { prompt + 1i32 } else { prompt };
+        while start <= bottommost
+            && matches!(
+                self.grid[start].mark,
+                RowMark::PromptSecondary | RowMark::PromptContinuation
+            )
+        {
+            start += 1i32;
+        }
+
+        // Stop before the next prompt and drop trailing empty rows.
+        let next_prompt = self.find_prompt(start - 1i32, Direction::Right);
+        let mut end = next_prompt.map_or(bottommost, |next| next - 1i32);
+        while end >= start && self.grid[end].is_clear() {
+            end -= 1i32;
+        }
+
+        (start <= end).then_some((start, end))
     }
 
     /// Handle a prompt start marker.
@@ -127,6 +173,7 @@ mod tests {
     use crate::term::Config;
     use crate::term::cell::Cell;
     use crate::term::test::TermSize;
+    use crate::vi_mode::ViMotion;
     use crate::vte::ansi::{self, PromptOptions};
 
     fn term(columns: usize, lines: usize, history: usize) -> Term<VoidListener> {
@@ -151,6 +198,11 @@ mod tests {
 
     fn mark_sequence(term: &Term<VoidListener>) -> Vec<RowMark> {
         marks(term).into_iter().map(|(_, mark)| mark).collect()
+    }
+
+    fn row_text(term: &Term<VoidListener>, line: i32) -> String {
+        let row = &term.grid()[Line(line)];
+        (0..row.len()).map(|column| row[Column(column)].c).collect::<String>().trim_end().into()
     }
 
     #[test]
@@ -358,6 +410,143 @@ mod tests {
             );
         }
         assert_eq!(marks(&term), [(0, RowMark::Prompt), (1, RowMark::OutputStart)]);
+    }
+
+    /// Three commands on a four-line screen; the first two scroll into history.
+    ///
+    /// Rows from the top: prompt, `one`, prompt, `two`, empty, empty, prompt, empty.
+    fn three_commands() -> Term<VoidListener> {
+        let mut term = term(10, 4, 20);
+        feed(
+            &mut term,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07a\r\n\x1b]133;C\x07one\r\n\x1b]133;D;0\x07",
+        );
+        feed(&mut term, b"\x1b]133;A\x07$ \x1b]133;B\x07b\r\n\x1b]133;C\x07two\r\n\r\n\r\n");
+        feed(&mut term, b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07c\r\n\x1b]133;C\x07");
+        assert_eq!(marks(&term), [
+            (-4, RowMark::Prompt),
+            (-3, RowMark::OutputStart),
+            (-2, RowMark::Prompt),
+            (-1, RowMark::OutputStart),
+            (2, RowMark::Prompt),
+            (3, RowMark::OutputStart),
+        ]);
+        term
+    }
+
+    #[test]
+    fn find_prompt_across_history() {
+        let empty = term(10, 4, 20);
+        assert_eq!(empty.find_prompt(Line(3), Direction::Left), None);
+        assert_eq!(empty.find_prompt(Line(0), Direction::Right), None);
+
+        let term = three_commands();
+
+        assert_eq!(term.find_prompt(Line(3), Direction::Left), Some(Line(2)));
+        assert_eq!(term.find_prompt(Line(2), Direction::Left), Some(Line(-2)));
+        assert_eq!(term.find_prompt(Line(-2), Direction::Left), Some(Line(-4)));
+        assert_eq!(term.find_prompt(Line(-4), Direction::Left), None);
+        assert_eq!(term.find_prompt(Line(10), Direction::Left), Some(Line(2)));
+
+        assert_eq!(term.find_prompt(Line(-4), Direction::Right), Some(Line(-2)));
+        assert_eq!(term.find_prompt(Line(-2), Direction::Right), Some(Line(2)));
+        assert_eq!(term.find_prompt(Line(2), Direction::Right), None);
+        assert_eq!(term.find_prompt(Line(-10), Direction::Right), Some(Line(-4)));
+    }
+
+    #[test]
+    fn output_bounds_per_command() {
+        let term = three_commands();
+
+        // Anchors on the prompt row and on the output row select the same output.
+        assert_eq!(term.output_bounds(Line(-4)), Some((Line(-3), Line(-3))));
+        assert_eq!(term.output_bounds(Line(-3)), Some((Line(-3), Line(-3))));
+
+        // Trailing empty rows are not part of the output.
+        assert_eq!(term.output_bounds(Line(-2)), Some((Line(-1), Line(-1))));
+        assert_eq!(term.output_bounds(Line(-1)), Some((Line(-1), Line(-1))));
+        assert_eq!(term.output_bounds(Line(1)), Some((Line(-1), Line(-1))));
+
+        // The running command has no output yet.
+        assert_eq!(term.output_bounds(Line(2)), None);
+        assert_eq!(term.output_bounds(Line(3)), None);
+    }
+
+    #[test]
+    fn output_bounds_without_prompt_row() {
+        // Output before the first prompt.
+        let mut before = term(10, 6, 0);
+        feed(&mut before, b"pre\r\n\x1b]133;A\x07$ \x1b]133;B\x07a\r\n\x1b]133;C\x07one\r\n");
+        assert_eq!(before.output_bounds(Line(0)), Some((Line(0), Line(0))));
+        assert_eq!(before.output_bounds(Line(3)), Some((Line(2), Line(2))));
+
+        // The prompt row was evicted, only the wrapped input row remains above the output.
+        let mut evicted = term(10, 3, 0);
+        feed(&mut evicted, b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijkl\r\n\x1b]133;C\x07one\r\n");
+        assert_eq!(marks(&evicted), [(0, RowMark::PromptContinuation), (1, RowMark::OutputStart)]);
+        assert_eq!(evicted.output_bounds(Line(2)), Some((Line(1), Line(1))));
+        assert_eq!(evicted.output_bounds(Line(0)), Some((Line(1), Line(1))));
+
+        // Nothing but empty rows.
+        let empty = term(10, 3, 0);
+        assert_eq!(empty.output_bounds(Line(1)), None);
+    }
+
+    #[test]
+    fn vi_prompt_motions() {
+        let mut term = three_commands();
+        term.toggle_vi_mode();
+        term.vi_mode_cursor.point = Point::new(Line(3), Column(2));
+
+        term.vi_motion(ViMotion::PromptUp);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(2), Column(0)));
+        term.vi_motion(ViMotion::PromptUp);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(-2), Column(0)));
+        assert_eq!(term.grid().display_offset(), 2);
+        term.vi_motion(ViMotion::PromptUp);
+        term.vi_motion(ViMotion::PromptUp);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(-4), Column(0)));
+        assert_eq!(term.grid().display_offset(), 4);
+
+        term.vi_motion(ViMotion::PromptDown);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(-2), Column(0)));
+        term.vi_motion(ViMotion::PromptDown);
+        term.vi_motion(ViMotion::PromptDown);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(2), Column(0)));
+        // The viewport scrolls just far enough to show the prompt.
+        assert_eq!(term.grid().display_offset(), 1);
+        term.vi_motion(ViMotion::PromptDown);
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(2), Column(0)));
+    }
+
+    #[test]
+    fn secondary_prompt_marks_survive_reflow() {
+        let mut term = term(10, 8, 10);
+        feed(
+            &mut term,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07command\r\n\
+              \x1b]133;P;k=s\x07abcdefghijklmno\x1b]133;B\x07\r\n\x1b]133;C\x07out\r\n",
+        );
+
+        for columns in [7, 12, 20] {
+            term.resize(TermSize::new(columns, 8));
+            let boundaries: Vec<_> = marks(&term)
+                .into_iter()
+                .filter(|(_, mark)| *mark != RowMark::PromptContinuation)
+                .collect();
+            assert_eq!(boundaries.iter().map(|(_, mark)| *mark).collect::<Vec<_>>(), [
+                RowMark::Prompt,
+                RowMark::PromptSecondary,
+                RowMark::OutputStart,
+            ]);
+            let primary = Line(boundaries[0].0);
+            let secondary = Line(boundaries[1].0);
+            let output = Line(boundaries[2].0);
+            assert_eq!(term.find_prompt(term.bottommost_line(), Direction::Left), Some(primary));
+            assert_eq!(term.output_bounds(primary), Some((output, output)));
+            assert_eq!(term.output_bounds(secondary), Some((output, output)));
+            assert_eq!(row_text(&term, output.0), "out");
+        }
     }
 
     #[cfg(feature = "serde")]

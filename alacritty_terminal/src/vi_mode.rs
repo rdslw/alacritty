@@ -56,6 +56,10 @@ pub enum ViMotion {
     ParagraphUp,
     /// Move below the current paragraph.
     ParagraphDown,
+    /// Move to the previous shell prompt reported through OSC 133.
+    PromptUp,
+    /// Move to the next shell prompt reported through OSC 133.
+    PromptDown,
 }
 
 /// Cursor tracking vi mode position.
@@ -177,6 +181,13 @@ impl ViModeCursor {
                     .find(|line| term.grid()[Line(*line)].is_clear())
                     .map_or(bottommost_line, Line);
                 self.point.column = Column(0);
+            },
+            ViMotion::PromptUp | ViMotion::PromptDown => {
+                let direction =
+                    if motion == ViMotion::PromptUp { Direction::Left } else { Direction::Right };
+                if let Some(line) = term.find_prompt(self.point.line, direction) {
+                    self.point = Point::new(line, Column(0));
+                }
             },
         }
 

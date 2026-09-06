@@ -69,7 +69,9 @@ Alacritty configuration file.
 After making a selection, you can use the right mouse button to expand it.
 Double-clicking will expand the selection semantically, while triple-clicking
 will perform line selection. If you hold <kbd>Ctrl</kbd> while expanding the
-selection, it will switch to the block selection mode.
+selection, it will switch to the block selection mode. With
+[shell integration](#shell-integration), holding <kbd>Ctrl</kbd> while
+triple-clicking selects the output of the command under the mouse cursor.
 
 ## Opening URLs with the mouse
 
@@ -105,3 +107,86 @@ Oh My Zsh do this by default. fish 3 only reports to terminals it recognizes,
 which excludes Alacritty, and bash or plain zsh need a prompt hook. Remote hosts
 are not interpreted as local paths. See [alacritty-escapes(7) manpage] for host
 matching, Windows paths, and reset behavior.
+
+## Shell integration
+
+Shells can mark their prompt, the typed command, and the command output with
+OSC 133 escape sequences. Alacritty records these marks per row, keeps them in
+the scrollback, and uses them for prompt navigation and command output
+selection:
+
+- The `ScrollToPreviousPrompt` and `ScrollToNextPrompt` actions put the previous
+  or next prompt at the top of the viewport.
+- The `PromptUp` and `PromptDown` vi motions move the vi cursor to the previous
+  or next prompt.
+- The `ToggleOutputSelection` vi action selects the output of the command under
+  the vi cursor. <kbd>Ctrl</kbd> + triple click selects the output of the
+  command under the mouse cursor.
+
+None of these have default bindings. Example:
+
+```toml
+[[keyboard.bindings]]
+key = "Up"
+mods = "Control|Shift"
+mode = "~Alt"
+action = "ScrollToPreviousPrompt"
+
+[[keyboard.bindings]]
+key = "Down"
+mods = "Control|Shift"
+mode = "~Alt"
+action = "ScrollToNextPrompt"
+
+[[keyboard.bindings]]
+key = "["
+mode = "Vi|~Search"
+action = "PromptUp"
+
+[[keyboard.bindings]]
+key = "]"
+mode = "Vi|~Search"
+action = "PromptDown"
+
+[[keyboard.bindings]]
+key = "o"
+mods = "Alt"
+mode = "Vi|~Search"
+action = "ToggleOutputSelection"
+```
+
+Marks are kept per row. Output that ends on the row of the next prompt, because
+the command printed no trailing newline, is not part of the output selection.
+
+The shell has to send the markers. Put the prompt start (`A`) and prompt end
+(`B`) markers into the prompt string, so that a repaint sends them again. Send
+the command end marker (`D`) before each prompt and the command start marker
+(`C`) before a command runs. Shells which send only `A` and `B` cannot separate
+the output from the prompt.
+
+zsh:
+
+```zsh
+autoload -Uz add-zsh-hook
+_osc133_precmd() { print -n "\e]133;D;$?\a" }
+_osc133_preexec() { print -n "\e]133;C\a" }
+add-zsh-hook precmd _osc133_precmd
+add-zsh-hook preexec _osc133_preexec
+PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'
+```
+
+If a hook sets `PS1` on every prompt, add the markers inside that hook.
+
+bash:
+
+```bash
+PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
+PS0='\e]133;C\a'
+_osc133_precmd() { printf '\e]133;D;%s\a' "$?"; }
+PROMPT_COMMAND="_osc133_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+```
+
+fish 4 sends the markers by default. The integration scripts shipped with kitty
+and Ghostty also work. tmux handles the markers itself and does not forward
+them to Alacritty. See [alacritty-escapes(7) manpage] for the accepted markers
+and options.

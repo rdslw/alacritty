@@ -18,6 +18,9 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Added
 
 - OSC 7 working-directory inheritance for new windows, instances, and launched commands
+- OSC 133 shell integration: `ScrollToPreviousPrompt` and `ScrollToNextPrompt` actions,
+  `PromptUp` and `PromptDown` vi motions, `ToggleOutputSelection` vi action, and
+  Ctrl + triple click to select the output of a command
 
 ### Changed
 

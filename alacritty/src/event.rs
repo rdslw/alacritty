@@ -1246,6 +1246,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let control = self.modifiers().state().control_key();
         let selection_type = match self.mouse().click_state {
             ClickState::None => return,
+            ClickState::TripleClick if control => SelectionType::Output,
             _ if control => SelectionType::Block,
             ClickState::Click => SelectionType::Simple,
             ClickState::DoubleClick => SelectionType::Semantic,

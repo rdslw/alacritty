@@ -95,6 +95,8 @@ pub enum SelectionType {
     Block,
     Semantic,
     Lines,
+    /// Output of the shell command reported through OSC 133.
+    Output,
 }
 
 /// Describes a region of a 2-dimensional area.
@@ -220,7 +222,7 @@ impl Selection {
                         && start.side == Side::Left
                         && end.side == Side::Right)
             },
-            SelectionType::Semantic | SelectionType::Lines => false,
+            SelectionType::Semantic | SelectionType::Lines | SelectionType::Output => false,
         }
     }
 
@@ -292,6 +294,7 @@ impl Selection {
             SelectionType::Block => self.range_block(start, end),
             SelectionType::Semantic => Some(Self::range_semantic(term, start.point, end.point)),
             SelectionType::Lines => Some(Self::range_lines(term, start.point, end.point)),
+            SelectionType::Output => Self::range_output(term, start.point, end.point),
         }
     }
 
@@ -321,6 +324,16 @@ impl Selection {
         let end = term.line_search_right(end);
 
         SelectionRange { start, end, is_block: false }
+    }
+
+    /// Select whole command outputs, from the one at `start` to the one at `end`.
+    fn range_output<T>(term: &Term<T>, start: Point, end: Point) -> Option<SelectionRange> {
+        let (first, _) = term.output_bounds(start.line)?;
+        let (_, last) = term.output_bounds(end.line)?;
+        let start = Point::new(first, Column(0));
+        let end = Point::new(last, term.last_column());
+
+        (start <= end).then_some(SelectionRange { start, end, is_block: false })
     }
 
     fn range_simple(
@@ -395,6 +408,9 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::event::VoidListener;
+    use crate::vte::ansi;
 
     use crate::index::{Column, Point, Side};
     use crate::term::test::TermSize;
@@ -544,6 +560,37 @@ mod tests {
             end: Point::new(Line(5), Column(3)),
             is_block: false,
         });
+    }
+
+    #[test]
+    fn output_selection() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 6), VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(
+            &mut term,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07a\r\n\x1b]133;C\x07one\r\ntwo\r\n\r\n",
+        );
+        parser.advance(&mut term, b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+
+        // Rows: prompt, `one`, `two`, empty, prompt.
+        let expected = SelectionRange {
+            start: Point::new(Line(1), Column(0)),
+            end: Point::new(Line(2), Column(9)),
+            is_block: false,
+        };
+        let mut selection =
+            Selection::new(SelectionType::Output, Point::new(Line(2), Column(5)), Side::Left);
+        assert_eq!(selection.to_range(&term), Some(expected));
+        assert!(!selection.is_empty());
+
+        // Dragging onto the prompt row keeps the output rows only.
+        selection.update(Point::new(Line(0), Column(0)), Side::Left);
+        assert_eq!(selection.to_range(&term), Some(expected));
+
+        // The last prompt has no output.
+        let selection =
+            Selection::new(SelectionType::Output, Point::new(Line(4), Column(0)), Side::Left);
+        assert_eq!(selection.to_range(&term), None);
     }
 
     #[test]
