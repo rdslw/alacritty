@@ -28,7 +28,10 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod prompt;
 pub mod search;
+
+pub use prompt::{PromptState, PromptZone};
 
 /// Minimum number of columns.
 ///
@@ -315,6 +318,9 @@ pub struct Term<T> {
     /// Last working-directory URI reported through OSC 7.
     current_directory: Option<String>,
 
+    /// Shell state reported through OSC 133.
+    prompt: PromptState,
+
     /// Stack of saved window titles. When a title is popped from this stack, the `title` for the
     /// term is set.
     title_stack: Vec<Option<String>>,
@@ -444,6 +450,7 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             current_directory: Default::default(),
+            prompt: Default::default(),
             mode: Default::default(),
         }
     }
@@ -984,6 +991,7 @@ impl<T> Term<T> {
         } else {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
+            self.inherit_prompt_mark();
         }
 
         self.grid.cursor.point.column = Column(0);
@@ -1072,6 +1080,30 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_current_directory(&mut self, uri: String) {
         self.current_directory = if uri.is_empty() { None } else { Some(uri) };
+    }
+
+    #[inline]
+    fn prompt_start(&mut self, prompt: ansi::PromptStart) {
+        trace!("Prompt start: {prompt:?}");
+        self.mark_prompt_start(prompt);
+    }
+
+    #[inline]
+    fn command_start(&mut self) {
+        trace!("Command start");
+        self.set_prompt_zone(PromptZone::Input);
+    }
+
+    #[inline]
+    fn command_executed(&mut self) {
+        trace!("Command executed");
+        self.mark_command_executed();
+    }
+
+    #[inline]
+    fn command_finished(&mut self, status: Option<u8>) {
+        trace!("Command finished: {status:?}");
+        self.set_prompt_zone(PromptZone::Output);
     }
 
     /// A character to be displayed.
@@ -1442,10 +1474,12 @@ impl<T: EventListener> Handler for Term<T> {
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
             self.scroll_up(1);
+            self.inherit_prompt_mark();
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
             self.damage_cursor();
+            self.inherit_prompt_mark();
         }
     }
 
@@ -1862,6 +1896,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.title_stack = Vec::new();
         self.title = None;
         self.current_directory = None;
+        self.prompt = Default::default();
         self.selection = None;
         self.vi_mode_cursor = Default::default();
         self.keyboard_mode_stack = Default::default();

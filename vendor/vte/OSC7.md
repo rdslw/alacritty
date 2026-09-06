@@ -4,11 +4,12 @@ This directory contains the build and test sources from the published `vte 0.15.
 crate, based on commit `3b3da71c34cc1256c7e20981cf03f8eb95e08ffc`.
 The original MIT and Apache licenses are included.
 
-The only source changes are in `src/ansi.rs`: the default no-op
+The OSC 7 changes are in `src/ansi.rs`: the default no-op
 `Handler::set_current_directory` callback and OSC 7 dispatch. Dispatch preserves
 literal semicolons and accepts only UTF-8. Reports at the parser's parameter limit
 are ignored because their contents may have been truncated; encode semicolons as
-`%3B` to avoid that limit.
+`%3B` to avoid that limit. A second patch, OSC 133 prompt markers, is described
+in `OSC133.md`.
 
 This copy is selected by the workspace's `[patch.crates-io]` entry. Replace it
 with a released vte dependency once that API is available upstream. Keeping the

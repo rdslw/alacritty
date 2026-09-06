@@ -24,5 +24,6 @@ toml_edit = "0.24.0"
 # TODO: Validation of fix for #6978. Remove before next release and use released `x11-clipboard`.
 [patch.crates-io]
 x11-clipboard = { git = "https://github.com/quininer/x11-clipboard.git", rev = "19ab2163cf0bd0db607e827a5214571990307866" }
-# TODO: Replace with a released vte version providing OSC 7 support. See vendor/vte/OSC7.md.
+# TODO: Replace with a released vte version providing OSC 7 and OSC 133 support.
+# See vendor/vte/OSC7.md and vendor/vte/OSC133.md.
 vte = { path = "vendor/vte" }

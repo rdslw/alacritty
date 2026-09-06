@@ -55,6 +55,48 @@ pub struct Hyperlink {
     pub uri: String,
 }
 
+/// Prompt kind reported through OSC 133 `A`, `N`, or `P`.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Primary prompt.
+    #[default]
+    Primary,
+    /// Continuation prompt of a multi-line command.
+    Continuation,
+}
+
+/// How the shell repaints its prompt after a resize (OSC 133 `redraw` option).
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub enum PromptRedraw {
+    /// The shell redraws the whole prompt.
+    #[default]
+    Full,
+    /// The shell does not redraw the prompt.
+    None,
+    /// The shell redraws only the last line of the prompt.
+    LastLine,
+}
+
+/// Options of an OSC 133 `A` or `N` prompt start marker.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct PromptOptions {
+    /// How the shell repaints its prompt after a resize (`redraw`).
+    pub redraw: PromptRedraw,
+    /// Value of the `click_events` option, `1` or `2`, when the shell accepts
+    /// mouse click reports.
+    pub click_events: Option<u8>,
+}
+
+/// Parameters of an OSC 133 prompt start marker.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct PromptStart {
+    /// Kind of the prompt.
+    pub kind: PromptKind,
+    /// Options of an `A` or `N` marker. A `P` marker carries `None` and keeps
+    /// the previous values.
+    pub options: Option<PromptOptions>,
+}
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Rgb {
@@ -237,6 +279,41 @@ fn parse_number(input: &[u8]) -> Option<u8> {
         num = num.checked_mul(10).and_then(|v| v.checked_add(digit as u8))?;
     }
     Some(num)
+}
+
+/// Parse the `k=` field of an OSC 133 prompt start marker.
+///
+/// The last `k=` field wins; a missing or unknown value is a primary prompt.
+fn parse_prompt_kind(fields: &[&[u8]]) -> PromptKind {
+    match fields.iter().rev().find_map(|field| field.strip_prefix(b"k=")) {
+        Some(b"s" | b"c") => PromptKind::Continuation,
+        _ => PromptKind::Primary,
+    }
+}
+
+/// Parse the `redraw=` and `click_events=` fields of an OSC 133 `A` or `N`
+/// prompt start marker.
+///
+/// Unknown keys and fields without a value are ignored. Later duplicates
+/// override earlier ones.
+fn parse_prompt_options(fields: &[&[u8]]) -> PromptOptions {
+    let mut options = PromptOptions::default();
+    for field in fields {
+        if let Some(redraw) = field.strip_prefix(b"redraw=") {
+            options.redraw = match redraw {
+                b"0" => PromptRedraw::None,
+                b"last" => PromptRedraw::LastLine,
+                _ => PromptRedraw::Full,
+            };
+        } else if let Some(click_events) = field.strip_prefix(b"click_events=") {
+            options.click_events = match click_events {
+                b"1" => Some(1),
+                b"2" => Some(2),
+                _ => None,
+            };
+        }
+    }
+    options
 }
 
 /// Internal state for VTE processor.
@@ -702,6 +779,20 @@ pub trait Handler {
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
+
+    /// Mark the start of a prompt (OSC 133 `A`, `N`, `P`).
+    fn prompt_start(&mut self, _: PromptStart) {}
+
+    /// Mark the end of the prompt and the start of user input (OSC 133 `B`,
+    /// `I`).
+    fn command_start(&mut self) {}
+
+    /// Mark the start of command output (OSC 133 `C`).
+    fn command_executed(&mut self) {}
+
+    /// Mark the end of a command with its exit status when reported (OSC 133
+    /// `D`).
+    fn command_finished(&mut self, _: Option<u8>) {}
 
     /// Set mouse cursor icon.
     fn set_mouse_cursor_icon(&mut self, _: CursorIcon) {}
@@ -1530,6 +1621,36 @@ where
             // Reset text cursor color.
             b"112" => self.handler.reset_color(NamedColor::Cursor as usize),
 
+            // Semantic prompt markers. The marker and the exit status are the
+            // leading fields, so a parameter list truncated at the parser's
+            // limit still identifies the marker.
+            b"133" if params.len() >= 2 => match params[1] {
+                b"A" | b"N" => {
+                    let kind = parse_prompt_kind(&params[2..]);
+                    let mut options = parse_prompt_options(&params[2..]);
+                    // A truncated field list may have dropped `redraw=0`;
+                    // never clear a prompt the shell might not repaint.
+                    if params.len() >= crate::MAX_OSC_PARAMS {
+                        options.redraw = PromptRedraw::None;
+                    }
+                    self.handler.prompt_start(PromptStart { kind, options: Some(options) });
+                },
+                // A `P` marker only carries the prompt kind.
+                b"P" => {
+                    let kind = parse_prompt_kind(&params[2..]);
+                    self.handler.prompt_start(PromptStart { kind, options: None });
+                },
+                b"B" | b"I" => self.handler.command_start(),
+                b"C" => self.handler.command_executed(),
+                b"D" => {
+                    let status = params.get(2).copied().and_then(parse_number);
+                    self.handler.command_finished(status);
+                },
+                // Fresh line markers carry no state for the terminal.
+                b"L" => (),
+                _ => unhandled(params),
+            },
+
             _ => unhandled(params),
         }
     }
@@ -2049,6 +2170,14 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum PromptEvent {
+        PromptStart(PromptStart),
+        CommandStart,
+        CommandExecuted,
+        CommandFinished(Option<u8>),
+    }
+
     struct MockHandler {
         index: CharsetIndex,
         charset: StandardCharset,
@@ -2056,6 +2185,7 @@ mod tests {
         identity_reported: bool,
         color: Option<Rgb>,
         reset_colors: Vec<usize>,
+        prompt_events: Vec<PromptEvent>,
     }
 
     impl Handler for MockHandler {
@@ -2087,6 +2217,22 @@ mod tests {
         fn reset_color(&mut self, index: usize) {
             self.reset_colors.push(index)
         }
+
+        fn prompt_start(&mut self, prompt: PromptStart) {
+            self.prompt_events.push(PromptEvent::PromptStart(prompt));
+        }
+
+        fn command_start(&mut self) {
+            self.prompt_events.push(PromptEvent::CommandStart);
+        }
+
+        fn command_executed(&mut self) {
+            self.prompt_events.push(PromptEvent::CommandExecuted);
+        }
+
+        fn command_finished(&mut self, status: Option<u8>) {
+            self.prompt_events.push(PromptEvent::CommandFinished(status));
+        }
     }
 
     impl Default for MockHandler {
@@ -2098,6 +2244,7 @@ mod tests {
                 identity_reported: false,
                 color: None,
                 reset_colors: Vec::new(),
+                prompt_events: Vec::new(),
             }
         }
     }
@@ -2464,5 +2611,213 @@ mod tests {
         let rgb1 = Rgb { r: 0x12, g: 0x34, b: 0x56 };
         let rgb2 = Rgb { r: 0xFE, g: 0xDC, b: 0xBA };
         assert!((rgb1.contrast(rgb2) - 9.786_558_997_257_74).abs() < f64::EPSILON);
+    }
+
+    /// Feed `bytes` to a fresh parser and return the recorded prompt events.
+    fn prompt_events(bytes: &[u8]) -> Vec<PromptEvent> {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+        parser.advance(&mut handler, bytes);
+        handler.prompt_events
+    }
+
+    /// Prompt start event of an `A` or `N` marker.
+    fn prompt_start_a(
+        kind: PromptKind,
+        redraw: PromptRedraw,
+        click_events: Option<u8>,
+    ) -> PromptEvent {
+        let options = Some(PromptOptions { redraw, click_events });
+        PromptEvent::PromptStart(PromptStart { kind, options })
+    }
+
+    /// Prompt start event of a `P` marker.
+    fn prompt_start_p(kind: PromptKind) -> PromptEvent {
+        PromptEvent::PromptStart(PromptStart { kind, options: None })
+    }
+
+    #[test]
+    fn osc133_core_markers() {
+        let events = prompt_events(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+        assert_eq!(events, [
+            prompt_start_a(PromptKind::Primary, PromptRedraw::Full, None),
+            PromptEvent::CommandStart,
+            PromptEvent::CommandExecuted,
+            PromptEvent::CommandFinished(Some(0)),
+        ]);
+
+        // ST termination.
+        let events = prompt_events(b"\x1b]133;A\x1b\\");
+        assert_eq!(events, [prompt_start_a(PromptKind::Primary, PromptRedraw::Full, None)]);
+    }
+
+    #[test]
+    fn osc133_prompt_options() {
+        use PromptKind::{Continuation, Primary};
+        use PromptRedraw::{Full, LastLine};
+
+        let events = prompt_events(b"\x1b]133;A;k=s\x07");
+        assert_eq!(events, [prompt_start_a(Continuation, Full, None)]);
+
+        let events = prompt_events(b"\x1b]133;P;k=i\x07");
+        assert_eq!(events, [prompt_start_p(Primary)]);
+
+        let events = prompt_events(b"\x1b]133;P;k=s\x07");
+        assert_eq!(events, [prompt_start_p(Continuation)]);
+
+        // The `P` marker ignores the `A` and `N` options.
+        let events = prompt_events(b"\x1b]133;P;k=s;redraw=last;click_events=1\x07");
+        assert_eq!(events, [prompt_start_p(Continuation)]);
+
+        let events = prompt_events(b"\x1b]133;A;redraw=0\x07");
+        assert_eq!(events, [prompt_start_a(Primary, PromptRedraw::None, None)]);
+
+        let events = prompt_events(b"\x1b]133;A;redraw=last;cl=line;aid=1234\x07");
+        assert_eq!(events, [prompt_start_a(Primary, LastLine, None)]);
+
+        let events = prompt_events(b"\x1b]133;A;click_events=1\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, Some(1))]);
+
+        let events = prompt_events(b"\x1b]133;A;click_events=2;redraw=1\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, Some(2))]);
+
+        let events = prompt_events(b"\x1b]133;N\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, None)]);
+    }
+
+    #[test]
+    fn osc133_exit_status() {
+        let events = prompt_events(b"\x1b]133;D;130\x07");
+        assert_eq!(events, [PromptEvent::CommandFinished(Some(130))]);
+
+        let events = prompt_events(b"\x1b]133;D;130;aid=42\x07");
+        assert_eq!(events, [PromptEvent::CommandFinished(Some(130))]);
+
+        for bytes in [
+            b"\x1b]133;D\x07".as_slice(),
+            b"\x1b]133;D;\x07",
+            b"\x1b]133;D;abc\x07",
+            b"\x1b]133;D;256\x07",
+            b"\x1b]133;D;-1\x07",
+        ] {
+            let events = prompt_events(bytes);
+            assert_eq!(events, [PromptEvent::CommandFinished(None)], "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn osc133_ignored_and_malformed() {
+        use PromptKind::Primary;
+        use PromptRedraw::Full;
+
+        for bytes in
+            [b"\x1b]133\x07".as_slice(), b"\x1b]133;Z\x07", b"\x1b]133;\x07", b"\x1b]133;L\x07"]
+        {
+            let events = prompt_events(bytes);
+            assert_eq!(events, [], "{bytes:?}");
+        }
+
+        let events = prompt_events(b"\x1b]133;I\x07");
+        assert_eq!(events, [PromptEvent::CommandStart]);
+
+        let events = prompt_events(b"\x1b]133;A;k=\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, None)]);
+
+        let events = prompt_events(b"\x1b]133;A;redraw\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, None)]);
+
+        let events = prompt_events(b"\x1b]133;A;=s\x07");
+        assert_eq!(events, [prompt_start_a(Primary, Full, None)]);
+
+        let events = prompt_events(b"\x1b]133;C;cmdline_url=ls%20-l\x07");
+        assert_eq!(events, [PromptEvent::CommandExecuted]);
+    }
+
+    #[test]
+    fn osc133_real_shell_sequences() {
+        use PromptKind::{Continuation, Primary};
+        use PromptRedraw::{Full, LastLine};
+
+        // Fish 4.
+        let events = prompt_events(
+            b"\x1b]133;A;click_events=1\x1b\\\x1b]133;B\x1b\\\
+              \x1b]133;C;cmdline_url=ls\x1b\\\x1b]133;D;0\x1b\\",
+        );
+        assert_eq!(events, [
+            prompt_start_a(Primary, Full, Some(1)),
+            PromptEvent::CommandStart,
+            PromptEvent::CommandExecuted,
+            PromptEvent::CommandFinished(Some(0)),
+        ]);
+
+        // Ghostty bash integration.
+        let events = prompt_events(
+            b"\x1b]133;D;1;aid=4242\x07\x1b]133;A;redraw=last;cl=line;aid=4242\x07\
+              \x1b]133;P;k=i\x07$ \x1b]133;B\x07\x1b]133;C;\x07",
+        );
+        assert_eq!(events, [
+            PromptEvent::CommandFinished(Some(1)),
+            prompt_start_a(Primary, LastLine, None),
+            prompt_start_p(Primary),
+            PromptEvent::CommandStart,
+            PromptEvent::CommandExecuted,
+        ]);
+
+        // Ghostty zsh integration.
+        let events = prompt_events(
+            b"\x1b]133;A;cl=line\x07\x1b]133;P;k=s\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07",
+        );
+        assert_eq!(events, [
+            prompt_start_a(Primary, Full, None),
+            prompt_start_p(Continuation),
+            PromptEvent::CommandStart,
+            PromptEvent::CommandExecuted,
+            PromptEvent::CommandFinished(Some(0)),
+        ]);
+
+        // Kitty.
+        let events = prompt_events(
+            b"\x1b]133;A\x1b\\\x1b]133;A;k=s\x1b\\\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\",
+        );
+        assert_eq!(events, [
+            prompt_start_a(Primary, Full, None),
+            prompt_start_a(Continuation, Full, None),
+            PromptEvent::CommandExecuted,
+            PromptEvent::CommandFinished(Some(0)),
+        ]);
+    }
+
+    #[test]
+    fn osc133_fragmented_input() {
+        let bytes = b"\x1b]133;A;redraw=last\x07";
+        let expected = [prompt_start_a(PromptKind::Primary, PromptRedraw::LastLine, None)];
+
+        for split in 0..=bytes.len() {
+            let mut parser = Processor::<TestSyncHandler>::new();
+            let mut handler = MockHandler::default();
+            parser.advance(&mut handler, &bytes[..split]);
+            parser.advance(&mut handler, &bytes[split..]);
+            assert_eq!(handler.prompt_events, expected, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn osc133_options_at_parameter_limit() {
+        // Thirteen option fields fit below the limit, `redraw=0` is honored.
+        let mut fields = (0..12).map(|i| format!("x{i}=1")).collect::<Vec<_>>();
+        fields.push("redraw=0".into());
+        let bytes = format!("\x1b]133;A;{}\x07", fields.join(";"));
+        let events = prompt_events(bytes.as_bytes());
+        assert_eq!(events, [prompt_start_a(PromptKind::Primary, PromptRedraw::None, None)]);
+
+        // At the limit the list may have been truncated: report the safe value,
+        // even when a `redraw=1` field is the last one kept.
+        for extra in 1..3 {
+            let mut fields = (0..(12 + extra)).map(|i| format!("x{i}=1")).collect::<Vec<_>>();
+            fields.insert(0, "redraw=1".into());
+            let bytes = format!("\x1b]133;A;{}\x07", fields.join(";"));
+            let events = prompt_events(bytes.as_bytes());
+            assert_eq!(events, [prompt_start_a(PromptKind::Primary, PromptRedraw::None, None)]);
+        }
     }
 }

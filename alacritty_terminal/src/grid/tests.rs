@@ -388,3 +388,10 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn row_size() {
+    // `Storage::swap` relies on the row being a small number of words.
+    assert_eq!(std::mem::size_of::<Row<Cell>>(), 32);
+}

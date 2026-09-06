@@ -16,7 +16,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-pub use self::row::Row;
+pub use self::row::{Row, RowMark};
 use self::storage::Storage;
 
 pub trait GridCell: Sized {

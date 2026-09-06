@@ -6,7 +6,7 @@ use std::mem;
 use crate::index::{Boundary, Column, Line};
 use crate::term::cell::{Flags, ResetDiscriminant};
 
-use crate::grid::row::Row;
+use crate::grid::row::{Row, RowMark};
 use crate::grid::{Dimensions, Grid, GridCell};
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -353,7 +353,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     if occ < columns {
                         wrapped.resize_with(columns, T::default);
                     }
+                    let mark = new_raw.last().map_or(RowMark::None, |row| row.mark.continuation());
                     row = Row::from_vec(wrapped, occ);
+                    row.mark = mark;
 
                     if i < self.display_offset {
                         // Since we added a new line, rotate up the viewport.

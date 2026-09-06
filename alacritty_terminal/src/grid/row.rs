@@ -11,6 +11,36 @@ use crate::grid::GridCell;
 use crate::index::Column;
 use crate::term::cell::ResetDiscriminant;
 
+/// OSC 133 semantic marker of a row.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum RowMark {
+    /// No marker, or command output.
+    #[default]
+    None,
+    /// First row of a primary prompt.
+    Prompt,
+    /// First row of a secondary prompt, which starts a new redraw region within the command.
+    PromptSecondary,
+    /// Later row of a prompt, or a wrapped or continued input line.
+    PromptContinuation,
+    /// First row of command output.
+    OutputStart,
+}
+
+impl RowMark {
+    /// Marker for a row which continues this row after a reflow.
+    #[inline]
+    pub fn continuation(self) -> Self {
+        match self {
+            RowMark::Prompt | RowMark::PromptSecondary | RowMark::PromptContinuation => {
+                RowMark::PromptContinuation
+            },
+            RowMark::None | RowMark::OutputStart => RowMark::None,
+        }
+    }
+}
+
 /// A row in the grid.
 #[derive(Default, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -21,7 +51,11 @@ pub struct Row<T> {
     ///
     /// This is the upper bound on the number of elements in the row, which have been modified
     /// since the last reset. All cells after this point are guaranteed to be equal.
-    pub(crate) occ: usize,
+    pub(crate) occ: u32,
+
+    /// OSC 133 marker of this row.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mark: RowMark,
 }
 
 impl<T: PartialEq> PartialEq for Row<T> {
@@ -34,7 +68,7 @@ impl<T: Default> Row<T> {
     /// Create a new terminal row.
     pub fn new(columns: usize) -> Row<T> {
         let inner = iter::repeat_with(T::default).take(columns).collect();
-        Row { inner, occ: 0 }
+        Row { inner, occ: 0, mark: RowMark::None }
     }
 
     /// Increase the number of columns in the row.
@@ -63,7 +97,7 @@ impl<T: Default> Row<T> {
         let index = new_row.iter().rposition(|c| !c.is_empty()).map_or(0, |i| i + 1);
         new_row.truncate(index);
 
-        self.occ = min(self.occ, columns);
+        self.occ = min(self.occ, columns as u32);
 
         if new_row.is_empty() { None } else { Some(new_row) }
     }
@@ -80,15 +114,16 @@ impl<T: Default> Row<T> {
         // Mark all cells as dirty if template cell changed.
         let len = self.inner.len();
         if self.inner[len - 1].discriminant() != template.discriminant() {
-            self.occ = len;
+            self.occ = len as u32;
         }
 
         // Reset every dirty cell in the row.
-        for item in &mut self.inner[0..self.occ] {
+        for item in &mut self.inner[0..self.occ as usize] {
             item.reset(template);
         }
 
         self.occ = 0;
+        self.mark = RowMark::None;
     }
 }
 
@@ -96,7 +131,7 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ }
+        Row { inner: vec, occ: occ as u32, mark: RowMark::None }
     }
 
     #[inline]
@@ -111,7 +146,7 @@ impl<T> Row<T> {
 
     #[inline]
     pub fn last_mut(&mut self) -> Option<&mut T> {
-        self.occ = self.inner.len();
+        self.occ = self.inner.len() as u32;
         self.inner.last_mut()
     }
 
@@ -120,13 +155,13 @@ impl<T> Row<T> {
     where
         T: GridCell,
     {
-        self.occ += vec.len();
+        self.occ += vec.len() as u32;
         self.inner.append(vec);
     }
 
     #[inline]
     pub fn append_front(&mut self, mut vec: Vec<T>) {
-        self.occ += vec.len();
+        self.occ += vec.len() as u32;
 
         vec.append(&mut self.inner);
         self.inner = vec;
@@ -143,7 +178,7 @@ impl<T> Row<T> {
 
     #[inline]
     pub fn front_split_off(&mut self, at: usize) -> Vec<T> {
-        self.occ = self.occ.saturating_sub(at);
+        self.occ = self.occ.saturating_sub(at as u32);
 
         let mut split = self.inner.split_off(at);
         std::mem::swap(&mut split, &mut self.inner);
@@ -167,7 +202,7 @@ impl<'a, T> IntoIterator for &'a mut Row<T> {
 
     #[inline]
     fn into_iter(self) -> slice::IterMut<'a, T> {
-        self.occ = self.len();
+        self.occ = self.len() as u32;
         self.inner.iter_mut()
     }
 }
@@ -184,7 +219,7 @@ impl<T> Index<Column> for Row<T> {
 impl<T> IndexMut<Column> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Column) -> &mut T {
-        self.occ = max(self.occ, *index + 1);
+        self.occ = max(self.occ, (*index + 1) as u32);
         &mut self.inner[index.0]
     }
 }
@@ -201,7 +236,7 @@ impl<T> Index<Range<Column>> for Row<T> {
 impl<T> IndexMut<Range<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Range<Column>) -> &mut [T] {
-        self.occ = max(self.occ, *index.end);
+        self.occ = max(self.occ, *index.end as u32);
         &mut self.inner[(index.start.0)..(index.end.0)]
     }
 }
@@ -218,7 +253,7 @@ impl<T> Index<RangeTo<Column>> for Row<T> {
 impl<T> IndexMut<RangeTo<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeTo<Column>) -> &mut [T] {
-        self.occ = max(self.occ, *index.end);
+        self.occ = max(self.occ, *index.end as u32);
         &mut self.inner[..(index.end.0)]
     }
 }
@@ -235,7 +270,7 @@ impl<T> Index<RangeFrom<Column>> for Row<T> {
 impl<T> IndexMut<RangeFrom<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeFrom<Column>) -> &mut [T] {
-        self.occ = self.len();
+        self.occ = self.len() as u32;
         &mut self.inner[(index.start.0)..]
     }
 }
@@ -252,7 +287,7 @@ impl<T> Index<RangeFull> for Row<T> {
 impl<T> IndexMut<RangeFull> for Row<T> {
     #[inline]
     fn index_mut(&mut self, _: RangeFull) -> &mut [T] {
-        self.occ = self.len();
+        self.occ = self.len() as u32;
         &mut self.inner[..]
     }
 }
@@ -269,7 +304,7 @@ impl<T> Index<RangeToInclusive<Column>> for Row<T> {
 impl<T> IndexMut<RangeToInclusive<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeToInclusive<Column>) -> &mut [T] {
-        self.occ = max(self.occ, *index.end + 1);
+        self.occ = max(self.occ, (*index.end + 1) as u32);
         &mut self.inner[..=(index.end.0)]
     }
 }

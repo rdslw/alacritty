@@ -257,6 +257,9 @@ brevity.
 |  _OSC 112_
 :  Implemented
 :[
+|  _OSC 133_
+:  Implemented
+:[ Prompt and command markers; see *SHELL INTEGRATION*
 
 # DCS (Device Control String) - ESC P
 
@@ -299,6 +302,58 @@ bash, and plain zsh need a prompt hook. Alacritty cannot detect when a report
 becomes stale or distinguish filesystems which share a hostname. Explicit
 working-directory options supplied when starting Alacritty or creating a window
 through IPC retain their behavior.
+
+# SHELL INTEGRATION
+
+OSC 133 markers tell Alacritty where the prompt, the typed command, and the
+command output start. BEL may be used instead of ST. Option fields follow the
+marker letter, separated by semicolons; unknown fields are ignored.
+
+[[ *SEQUENCE*
+:[ *MEANING*
+|  _OSC 133 ; A ST_
+:  Prompt starts at the cursor
+|  _OSC 133 ; A ; k=s ST_
+:  Secondary or continuation prompt starts at the cursor
+|  _OSC 133 ; A ; redraw=0 ST_
+:  Prompt starts; the shell does not repaint it after a resize
+|  _OSC 133 ; A ; redraw=last ST_
+:  Prompt starts; the shell repaints only its last line after a resize
+|  _OSC 133 ; A ; click_events=1 ST_
+:  Prompt starts; the shell accepts mouse click reports (recorded only)
+|  _OSC 133 ; B ST_
+:  Prompt ends, user input starts
+|  _OSC 133 ; C ST_
+:  Command runs, output starts
+|  _OSC 133 ; D ; status ST_
+:  Command finished; the exit status is optional and currently unused
+|  _OSC 133 ; N ST_
+:  Same as _A_; nested commands are not tracked
+|  _OSC 133 ; P ; k=i ST_
+:  Same as _A_ without the _redraw_ and _click_events_ options
+|  _OSC 133 ; P ; k=s ST_
+:  Secondary prompt starts, keeping the previous _redraw_ and _click_events_ settings
+|  _OSC 133 ; I ST_
+:  Same as _B_; the input does not end at the end of the line
+|  _OSC 133 ; L ST_
+:  Accepted and ignored
+
+The row under the cursor is marked as a prompt row on _A_. Rows the cursor
+moves onto by a line feed or a line wrap while the shell draws its prompt or
+reads input are marked as prompt continuation rows, so multi-line prompts and
+wrapped input are tracked without _k=s_. An explicit secondary prompt marker
+(_A;k=s_ or _P;k=s_) marks the row under the cursor as a secondary prompt row.
+The row under the cursor is marked as the start of the output on _C_ when the
+cursor is in the first column.
+
+Marks follow their rows into the scrollback, through resizing, and are dropped
+with them. Clearing the screen keeps the marks of rows moved into the
+scrollback. A terminal reset drops all marks and the recorded shell state.
+Markers received on the alternate screen are ignored.
+
+Put _A_ and _B_ into the prompt string itself, so a prompt repaint sends them
+again. Send _D_ before the prompt from the precmd hook and _C_ from the preexec
+hook. See _docs/features.md_ for shell snippets.
 
 # MAINTAINERS
 
